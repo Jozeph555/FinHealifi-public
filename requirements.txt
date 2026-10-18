@@ -1,0 +1,57 @@
+# --- Веб-фреймворк ---
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+email-validator==2.2.0
+python-multipart==0.0.12
+
+# --- БД ---
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+alembic==1.13.3
+
+# --- Автентифікація і безпека ---
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+# ^ bcrypt 4.1+ несумісний з passlib 1.7.4 (ValueError у self-test
+#   passlib/handlers/bcrypt.py detect_wrap_bug)
+python-jose[cryptography]==3.3.0
+cryptography==43.0.1
+
+# --- Конфігурація ---
+python-dotenv==1.0.1
+
+# --- HTTP-клієнт (Monobank API) ---
+httpx==0.27.2
+
+# --- Імпорт виписок CSV/XLSX ---
+chardet==5.2.0
+openpyxl==3.1.5
+python-dateutil==2.9.0.post0
+
+# --- Імпорт виписок PDF ---
+pdfplumber==0.11.10
+
+# --- ML: категоризація транзакцій ---
+scikit-learn==1.5.2
+sentence-transformers==3.1.1
+imbalanced-learn==0.12.4
+numpy==1.26.4
+pandas==2.2.3
+
+# --- Прогнозування (Prophet) ---
+prophet==1.1.5
+
+# --- Оптимізація боргів (MILP) ---
+pulp==2.8.0
+
+# --- AI-радник (Claude API) ---
+anthropic==0.121.0
+
+# --- Планувальник фонових задач (періодична синхронізація Monobank) ---
+apscheduler==3.11.3
+
+# --- Тести (pytest проти тестової Postgres з docker-compose) ---
+pytest==9.1.1
+pytest-asyncio==1.4.0

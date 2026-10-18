@@ -1,0 +1,32 @@
+version: "3.8"
+services:
+  db:
+    image: postgres:15
+    container_name: finhealifi_db
+    environment:
+      POSTGRES_DB: finhealifi
+      POSTGRES_USER: finhealifi_user
+      POSTGRES_PASSWORD: finhealifi_pass
+    # Порт на хості — 5436; DATABASE_URL у .env має вказувати на нього.
+    ports:
+      - "5436:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Окрема БД лише для pytest (порт 5434, власний volume). tests/conftest.py
+  # підключається тільки до TEST_DATABASE_URL з ім'ям БД, що закінчується на _test.
+  db_test:
+    image: postgres:15
+    container_name: finhealifi_db_test
+    environment:
+      POSTGRES_DB: finhealifi_test
+      POSTGRES_USER: finhealifi_user
+      POSTGRES_PASSWORD: finhealifi_pass
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+  postgres_test_data:
