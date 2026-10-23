@@ -1,0 +1,6 @@
+# Дослідницькі залежності (scripts/analysis/); у продуктовий образ не входять.
+# Встановлювати поверх основних: pip install -r requirements.txt -r requirements-research.txt
+# torch тут не вказано: він уже приходить з requirements.txt як залежність sentence-transformers.
+
+# --- ETS у бектесті Berka (scripts/analysis/berka_backtest.py) ---
+statsmodels==0.15.0

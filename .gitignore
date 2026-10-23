@@ -105,3 +105,9 @@ scripts/analysis/out/
 # Claude Code
 .claude/scheduled_tasks.lock
 *.dump
+
+# Зовнішні датасети: дані не в git, лише README з описом вивантаження
+data/external/*
+!data/external/berka/
+data/external/berka/*
+!data/external/berka/README.md
