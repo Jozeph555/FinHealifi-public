@@ -25,7 +25,7 @@ def _apply_asset_arbitrage_pin(questions: list[str], context: dict) -> list[str]
 
     Список обрізається до трьох запитань.
     """
-    if context.get("asset_arbitrage_annual_savings") is not None:
+    if context.get("asset_arbitrage"):
         return [ASSET_ARBITRAGE_QUESTION] + questions[:2]
     return questions
 
@@ -60,7 +60,7 @@ async def get_answer(
     Повертає 500, якщо виклик моделі не вдався.
     """
     try:
-        context = await build_advisor_context(current_user.id)
+        context = await build_advisor_context(current_user.id, question=request.question)
         answer, follow_up = await answer_question(request.question, context)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

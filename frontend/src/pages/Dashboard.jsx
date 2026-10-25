@@ -25,6 +25,83 @@ function aggregateByCategory(transactions, start, end, nonSpendingCategories) {
   return Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
 }
 
+// Частка переплати за «лавиною», нижче якої економія MILP вважається несуттєвою.
+const NEGLIGIBLE_SAVINGS_SHARE = 0.01;
+
+const STRATEGY_LABELS = {
+  milp: "MILP (оптимальна)",
+  avalanche: "Лавина (avalanche)",
+  snowball: "Сніжок (snowball)",
+  minimum: "Лише мінімальні платежі",
+};
+
+// Підпис для плану, що не погашає борги за горизонт планування.
+function notPaidOffLabel(horizonMonths) {
+  return horizonMonths ? `не погашається за ${horizonMonths} міс` : "не погашається";
+}
+
+function StrategyComparison({ comparison, horizonMonths }) {
+  const milpInterest = comparison.milp.total_interest_paid;
+  const avalancheInterest = comparison.avalanche.total_interest_paid;
+  const nearAvalanche =
+    avalancheInterest <= 0 ||
+    avalancheInterest - milpInterest < NEGLIGIBLE_SAVINGS_SHARE * avalancheInterest;
+  const strategies = (nearAvalanche ? ["milp", "snowball", "minimum"] : ["milp", "avalanche"]).filter(
+    (strategy) => comparison[strategy]
+  );
+  const maxInterest = Math.max(...strategies.map((s) => comparison[s].total_interest_paid || 0));
+
+  return (
+    <div className="space-y-2 border-t border-ink/10 pt-4">
+      <p className="text-xs text-ink/50">
+        {nearAvalanche
+          ? "Оптимальна стратегія проти «сніжка» і мінімальних платежів"
+          : "Оптимальна стратегія проти популярної «лавини»"}
+      </p>
+      {strategies.map((strategy) => {
+        const data = comparison[strategy];
+        const widthPct = maxInterest > 0 ? (data.total_interest_paid / maxInterest) * 100 : 0;
+        return (
+          <div key={strategy}>
+            <div className="mb-1 flex justify-between text-xs">
+              <span className={strategy === "milp" ? "font-medium text-forest" : "text-ink/50"}>
+                {STRATEGY_LABELS[strategy]}
+                {data.months_to_payoff ? "" : ` — ${notPaidOffLabel(horizonMonths)}`}
+              </span>
+              <span className="font-mono">{formatMoney(data.total_interest_paid)}</span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-ink/5">
+              <div
+                className={`h-full rounded-full ${strategy === "milp" ? "bg-gold" : "bg-ink/20"}`}
+                style={{ width: `${widthPct}%` }}
+              />
+            </div>
+          </div>
+        );
+      })}
+      {nearAvalanche ? (
+        <div className="space-y-1 pt-1 text-xs">
+          {strategies
+            .filter((strategy) => strategy !== "milp")
+            .map((strategy) => (
+              <p key={strategy} className="text-gold">
+                Економія проти {strategy === "snowball" ? "«сніжка»" : "мінімальних платежів"}:{" "}
+                {formatMoney(comparison[strategy].total_interest_paid - milpInterest)}
+              </p>
+            ))}
+          <p className="text-ink/50">
+            Оптимальний план практично збігається з «лавиною» (різниця переплати менше 1 %).
+          </p>
+        </div>
+      ) : (
+        <p className="pt-1 text-xs text-gold">
+          Економія: {formatMoney(avalancheInterest - milpInterest)}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [plan, setPlan] = useState(null);
   const [planError, setPlanError] = useState(false);
@@ -127,9 +204,11 @@ export default function Dashboard() {
             <div className="flex items-baseline justify-between">
               <div>
                 <p className="text-xs text-ink/50">Місяців до повного погашення</p>
-                <p className="font-mono text-2xl font-semibold text-forest">
-                  {plan.months_to_payoff ?? "—"}
-                </p>
+                {plan.months_to_payoff ? (
+                  <p className="font-mono text-2xl font-semibold text-forest">{plan.months_to_payoff}</p>
+                ) : (
+                  <p className="text-sm font-medium text-brick">{notPaidOffLabel(plan.horizon_months)}</p>
+                )}
               </div>
               <div className="text-right">
                 <p className="text-xs text-ink/50">Переплата відсотків</p>
@@ -137,44 +216,9 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Порівняння MILP і avalanche */}
-            {plan.comparison?.avalanche && (
-              <div className="space-y-2 border-t border-ink/10 pt-4">
-                <p className="text-xs text-ink/50">Оптимальна стратегія проти популярної "лавини"</p>
-                {["milp", "avalanche"].map((strategy) => {
-                  const data = plan.comparison[strategy];
-                  const maxInterest = Math.max(
-                    plan.comparison.milp?.total_interest_paid || 0,
-                    plan.comparison.avalanche?.total_interest_paid || 0
-                  );
-                  const widthPct = maxInterest > 0 ? (data.total_interest_paid / maxInterest) * 100 : 0;
-                  return (
-                    <div key={strategy}>
-                      <div className="mb-1 flex justify-between text-xs">
-                        <span className={strategy === "milp" ? "font-medium text-forest" : "text-ink/50"}>
-                          {strategy === "milp" ? "MILP (оптимальна)" : "Лавина (avalanche)"}
-                        </span>
-                        <span className="font-mono">{formatMoney(data.total_interest_paid)}</span>
-                      </div>
-                      <div className="h-2 w-full overflow-hidden rounded-full bg-ink/5">
-                        <div
-                          className={`h-full rounded-full ${strategy === "milp" ? "bg-gold" : "bg-ink/20"}`}
-                          style={{ width: `${widthPct}%` }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-                {plan.comparison.milp && plan.comparison.avalanche && (
-                  <p className="pt-1 text-xs text-gold">
-                    Економія:{" "}
-                    {formatMoney(
-                      plan.comparison.avalanche.total_interest_paid -
-                        plan.comparison.milp.total_interest_paid
-                    )}
-                  </p>
-                )}
-              </div>
+            {/* Порівняння MILP з евристиками */}
+            {plan.comparison?.milp && plan.comparison?.avalanche && (
+              <StrategyComparison comparison={plan.comparison} horizonMonths={plan.horizon_months} />
             )}
           </div>
         )}

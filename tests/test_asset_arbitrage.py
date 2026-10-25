@@ -114,7 +114,7 @@ async def test_withdrawable_capped_at_debt_balance(db_session, real_user):
 # --- закріплення запитання в GET /advisor/questions (без Anthropic API) ---
 
 def test_apply_asset_arbitrage_pin_prepends_and_trims():
-    context = {"asset_arbitrage_annual_savings": 2300}
+    context = {"asset_arbitrage": True}
     questions = ["Q1?", "Q2?", "Q3?"]
 
     result = _apply_asset_arbitrage_pin(questions, context)
@@ -124,7 +124,7 @@ def test_apply_asset_arbitrage_pin_prepends_and_trims():
 
 
 def test_apply_asset_arbitrage_pin_noop_without_opportunity():
-    context = {"asset_arbitrage_annual_savings": None}
+    context = {"asset_arbitrage": False}
     questions = ["Q1?", "Q2?", "Q3?"]
 
     result = _apply_asset_arbitrage_pin(questions, context)

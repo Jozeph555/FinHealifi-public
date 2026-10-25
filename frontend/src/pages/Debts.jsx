@@ -632,9 +632,11 @@ export default function Debts() {
             <div className="flex items-baseline justify-between border-b border-ink/10 pb-4">
               <div>
                 <p className="text-xs text-ink/50">Місяців до погашення</p>
-                <p className="font-mono text-2xl font-semibold text-forest">
-                  {plan.months_to_payoff ?? "—"}
-                </p>
+                {plan.months_to_payoff ? (
+                  <p className="font-mono text-2xl font-semibold text-forest">{plan.months_to_payoff}</p>
+                ) : (
+                  <p className="text-sm font-medium text-brick">{notPaidOffLabel(plan.horizon_months)}</p>
+                )}
               </div>
               <div className="text-right">
                 <p className="text-xs text-ink/50">Переплата (MILP)</p>
@@ -737,7 +739,7 @@ export default function Debts() {
                     <div className="text-right">
                       <span className="font-mono text-sm">{formatMoney(data.total_interest_paid)}</span>
                       <span className="ml-2 text-xs text-ink/40">
-                        {data.months_to_payoff ? `${data.months_to_payoff} міс` : "не погашується"}
+                        {data.months_to_payoff ? `${data.months_to_payoff} міс` : notPaidOffLabel(plan.horizon_months)}
                       </span>
                     </div>
                   </div>
@@ -748,6 +750,11 @@ export default function Debts() {
       </section>
     </div>
   );
+}
+
+// Підпис для плану, що не погашає борги за горизонт планування.
+function notPaidOffLabel(horizonMonths) {
+  return horizonMonths ? `не погашається за ${horizonMonths} міс` : "не погашається";
 }
 
 const INPUT_CLASS =

@@ -37,7 +37,7 @@ from app.models.database import AsyncSessionLocal
 from app.models.debt import Debt
 from app.models.transaction import Transaction
 from app.models.forecast import Forecast
-from app.services.debt_rules import revolving_min_payment
+from app.services.debt_rules import debt_min_payment
 from app.services.mcc_mapping import (
     INCOME_CATEGORIES,
     TRANSFER_CATEGORIES,
@@ -70,17 +70,14 @@ async def _active_debt_min_payments_total(session: AsyncSession, user_id: str) -
     історія боргів не зберігається.
     """
     result = await session.execute(
-        select(Debt.debt_type, Debt.balance, Debt.min_payment).where(
+        select(Debt.debt_type, Debt.balance, Debt.monthly_rate, Debt.min_payment).where(
             Debt.user_id == user_id, Debt.is_active == True  # noqa: E712
         )
     )
-    total = 0.0
-    for debt_type, balance, min_payment in result.all():
-        if debt_type == "revolving":
-            total += revolving_min_payment(balance)
-        else:
-            total += min_payment or 0
-    return total
+    return sum(
+        debt_min_payment(debt_type, balance, monthly_rate, min_payment)
+        for debt_type, balance, monthly_rate, min_payment in result.all()
+    )
 
 
 async def _query_expense_breakdown(session: AsyncSession, user_id: str) -> dict:

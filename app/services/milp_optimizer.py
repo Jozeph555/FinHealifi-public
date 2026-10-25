@@ -16,16 +16,19 @@ MILP-модель оптимального погашення боргів (PuLP
     - Нарахування: interest[i,t] = rate[i] * balance[i,t-1]  (лінійно)
     - Не можна переплатити понад залишок боргу цього місяця
     - Бюджет: Σ_i payment[i,t] <= monthly_budget, для кожного t
-    - Мінімальний платіж діє лише поки борг активний (big-M лінеаризація
-      через бінарну active[i,t]); борг вважається неактивним лише з нульовим
-      балансом: balance[i,t] <= M * active[i,t]
+    - Мінімальний платіж (debt_rules.min_payment_lower_bounds від
+      balance[i,t-1]) діє лише поки борг активний (big-M лінеаризація через
+      бінарну active[i,t]): payment >= межа - M_межі * (1 - active), де M_межі —
+      значення межі на верхній оцінці балансу min(M, balance0 * (1 + rate)^(t-1));
+      борг вважається неактивним лише з нульовим балансом:
+      balance[i,t] <= M * active[i,t]
 
 Бінарні змінні active[i,t] роблять задачу змішаною цілочисельною (MILP):
 умова «мінімальний платіж, поки борг не погашений» не виражається в чистому LP.
 """
 from pulp import LpProblem, LpMinimize, LpVariable, LpBinary, lpSum, PULP_CBC_CMD, LpStatus
 
-from app.services.debt_rules import REVOLVING_MIN_RATE, REVOLVING_MIN_FLOOR
+from app.services.debt_rules import min_payment_lower_bounds
 
 
 def optimize_milp(debts: list[dict], monthly_budget: float, months: int = 36) -> dict:
@@ -71,12 +74,17 @@ def optimize_milp(debts: list[dict], monthly_budget: float, months: int = 36) ->
             prob += payment[(n, t)] <= balance[(n, t - 1)] + interest[(n, t)]
             prob += balance[(n, t)] <= M * active[(n, t)]
 
-            if debt_type[n] == "revolving":
-                prob += payment[(n, t)] >= REVOLVING_MIN_RATE * balance[(n, t - 1)] - M * (1 - active[(n, t)])
-                prob += payment[(n, t)] >= REVOLVING_MIN_FLOOR - M * (1 - active[(n, t)])
-            else:
-                mp = min_payment[n] or 0
-                prob += payment[(n, t)] >= mp - M * (1 - active[(n, t)])
+            # Мінімум — найбільша з нижніх меж, діє лише поки борг активний.
+            # Обмеження «не більше боргу з відсотками» дає верхня межа платежу:
+            # якщо мінімум її перевищує, борг не може лишитися активним і
+            # гаситься повністю. Для кожної межі big-M — її значення на верхній
+            # оцінці балансу (межі не спадають з балансом): так обмеження
+            # вимикається при active = 0 і не слабшає більше, ніж потрібно.
+            balance_ub = min(M, balance0[n] * (1 + rate[n]) ** (t - 1))
+            bounds = min_payment_lower_bounds(debt_type[n], balance[(n, t - 1)], min_payment[n])
+            bounds_m = min_payment_lower_bounds(debt_type[n], balance_ub, min_payment[n])
+            for bound, bound_m in zip(bounds, bounds_m):
+                prob += payment[(n, t)] >= bound - bound_m * (1 - active[(n, t)])
 
     for t in range(1, months + 1):
         prob += lpSum(payment[(n, t)] for n in names) <= monthly_budget

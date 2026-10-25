@@ -1,5 +1,5 @@
 """
-Тести оптимальності MILP відносно евристик avalanche і snowball.
+Тести оптимальності MILP відносно евристик avalanche, snowball і minimum.
 
 milp_optimizer мінімізує суму відсотків за тих самих обмежень (бюджет на
 місяць, динаміка балансу, мінімальний платіж поки борг активний), яким
@@ -8,9 +8,10 @@ MILP-задачі. Отже, для будь-якої розв'язної зад
 
     milp.total_interest_paid <= avalanche.total_interest_paid
     milp.total_interest_paid <= snowball.total_interest_paid
+    milp.total_interest_paid <= minimum.total_interest_paid
 
 Справжній солвер PuLP + CBC на синтетичних портфелях боргів. EPSILON покриває
-округлення до копійок (round(x, 2)) і типовий MIP-gap CBC.
+округлення до копійок (round(x, 2)).
 """
 import random
 
@@ -18,7 +19,9 @@ import pytest
 
 from app.services.debt_optimizer import optimize_debt_repayment
 
-EPSILON = 0.5  # грн
+EPSILON = 0.01  # грн
+# Допуск рівності MILP і avalanche для одного боргу.
+MATCH_EPSILON = 0.5  # грн
 
 
 def assert_milp_not_worse(debts: list[dict], monthly_budget: float, months: int = 24) -> dict:
@@ -31,7 +34,7 @@ def assert_milp_not_worse(debts: list[dict], monthly_budget: float, months: int 
         f"debts={debts}, budget={monthly_budget}, months={months}"
     )
 
-    for strategy_name in ("avalanche", "snowball"):
+    for strategy_name in ("avalanche", "snowball", "minimum"):
         heuristic = result[strategy_name]
         assert milp["total_interest_paid"] <= heuristic["total_interest_paid"] + EPSILON, (
             f"MILP ({milp['total_interest_paid']} грн переплати) ГІРШИЙ за "
@@ -66,7 +69,7 @@ def test_milp_matches_heuristics_single_debt():
               "min_payment": 1500, "debt_type": "installment"}]
     result = assert_milp_not_worse(debts, monthly_budget=5000, months=24)
     assert abs(result["milp"]["total_interest_paid"]
-               - result["avalanche"]["total_interest_paid"]) <= EPSILON
+               - result["avalanche"]["total_interest_paid"]) <= MATCH_EPSILON
 
 
 def test_milp_beats_heuristics_tight_budget():

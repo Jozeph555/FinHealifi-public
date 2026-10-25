@@ -8,6 +8,9 @@
 - GET /debt/plan/latest повертає extra_monthly_uah (null для планів без нього)
   і is_stale — true/false, якщо відбиток збережено, null — якщо ні.
 - 404 не згадує optimize-from-forecast.
+- План, що не погашає борги за горизонт: months_to_payoff = null і
+  horizon_months у GET /debt/plan/latest; у контексті радника — речення, що
+  план не погашає борги за горизонт, без переплати.
 
 HTTP — через httpx ASGITransport на мінімальному FastAPI з роутером боргів.
 """
@@ -22,6 +25,8 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 import app.api.debt as debt_module
+from app.services.advisor_context import build_advisor_context
+from app.services.llm_advisor import _format_context
 from app.api.deps import get_current_user, get_db
 from app.models.forecast import Forecast
 from app.models.milp_plan import MilpPlan
@@ -204,3 +209,34 @@ async def test_latest_404_does_not_mention_deprecated_endpoint(client):
     assert resp.status_code == 404
     assert "optimize-from-forecast" not in resp.json()["detail"]
     assert "Борги" in resp.json()["detail"]
+
+
+# --- План, що не погашає борги за горизонт ------------------------------------------------
+
+async def test_latest_unpaid_plan_has_no_payoff_month_and_reports_horizon(db_session, real_user, client):
+    """Картка 20 000 під 4 % лише з мінімумом (800): баланс не зменшується за 36 міс."""
+    await _create_debt(client, name="Картка", balance=20_000, monthly_rate=0.04, min_payment=None,
+                       debt_type="revolving")
+    created = (await client.post("/debt/optimize", json={"extra_monthly_uah": 0})).json()
+    assert created["months_to_payoff"] is None
+
+    body = (await client.get("/debt/plan/latest")).json()
+
+    assert body["months_to_payoff"] is None
+    assert body["horizon_months"] == 36
+    assert body["comparison"]["milp"]["months_to_payoff"] is None
+
+    text = _format_context(await build_advisor_context(real_user.id, session=db_session))
+    assert "За планом не всі борги закриються за 36 міс., тому загальну переплату не називай." in text
+    assert "за 36 міс. цей борг не погашається" in text
+    assert "закриються через" not in text
+
+
+async def test_latest_paid_plan_has_payoff_month_and_no_horizon(client):
+    await _create_debt(client)
+    await client.post("/debt/optimize", json={"extra_monthly_uah": 3_000})
+
+    body = (await client.get("/debt/plan/latest")).json()
+
+    assert isinstance(body["months_to_payoff"], int) and body["months_to_payoff"] < 36
+    assert body["horizon_months"] is None

@@ -278,7 +278,7 @@ async def test_breakdown_components_sum_to_monthly_total(db_session, real_user, 
 
 # --- Готівка в раднику: окремий рядок, а не найбільша категорія ------------
 
-async def test_advisor_keeps_cash_out_of_top_category_and_reports_it_separately(
+async def test_advisor_context_has_no_categories_or_cash(
     db_session, real_user, account,
 ):
     from datetime import timedelta
@@ -289,8 +289,8 @@ async def test_advisor_keeps_cash_out_of_top_category_and_reports_it_separately(
     await _txn(db_session, real_user.id, account.id, recent + 120, -5000, "pending", mcc=5699)
     await db_session.commit()
 
-    context = await build_advisor_context(real_user.id, session=db_session)
+    text = _format_context(await build_advisor_context(real_user.id, session=db_session))
 
-    assert context["top_spending_category"] == "Продукти"
-    assert context["cash_withdrawn_last_30_days"] == 20000.0
-    assert "Знято готівкою: 20000.0 грн" in _format_context(context)
+    assert "Продукти" not in text
+    assert "готівк" not in text.lower()
+    assert "20 000" not in text and "20000" not in text

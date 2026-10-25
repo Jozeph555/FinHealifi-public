@@ -10,9 +10,7 @@
   інтерфейс його не використовує).
 """
 import math
-import statistics
 import uuid
-from datetime import date
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -27,14 +25,8 @@ from app.models.forecast import Forecast
 from app.models.milp_plan import MilpPlan
 from app.services.debt_fingerprint import debts_fingerprint
 from app.services.debt_optimizer import optimize_debt_repayment
-from app.services.debt_rules import revolving_min_payment
-from app.services.forecasting import (
-    _load_coverage,
-    _load_expense_breakdown,
-    _load_monthly_series,
-    _month_key,
-    _select_window,
-)
+from app.services.debt_rules import debt_min_payment
+from app.services.affordability import historical_free_cash_flow
 
 router = APIRouter(prefix="/debt", tags=["debt"])
 
@@ -336,9 +328,7 @@ class ExtraPaymentRequest(BaseModel):
 
 def _min_payment(debt: Debt) -> float:
     """Повертає поточний мінімальний платіж боргу за правилами debt_rules."""
-    if debt.debt_type == "revolving":
-        return revolving_min_payment(debt.balance)
-    return debt.min_payment or 0
+    return debt_min_payment(debt.debt_type, debt.balance, debt.monthly_rate, debt.min_payment)
 
 
 @router.post("/optimize", status_code=201)
@@ -438,39 +428,9 @@ async def affordability(
     extra, а також мінімум, максимум, медіану, P25 і P75 (лінійна інтерполяція).
     Якщо повних місяців менше 3 — порожні підсумки з поясненням. Суми в гривнях.
     """
-    income_df = await _load_monthly_series(current_user.id, income=True, session=db)
-    breakdown = await _load_expense_breakdown(current_user.id, session=db)
-    coverage, _ = await _load_coverage(db, current_user.id)
-    window = _select_window(coverage, date.today())
-
-    window_months = [] if window["partial_months_only"] else [_month_key(m) for m in window["months"]]
-    used = window_months[-months:]
-    income = {_month_key(ds): float(y) for ds, y in zip(income_df["ds"], income_df["y"])}
-    expenses = {m["month"]: float(m["total"]) for m in breakdown["months"]}
-    series = [{"month": m, "fcf_uah": income.get(m, 0.0) - expenses.get(m, 0.0)} for m in used]
-    values = [row["fcf_uah"] for row in series]
-
-    explanation = None
-    if len(used) < months:
-        explanation = f"Історії лише {len(used)} повних місяців із {months} запитаних."
-    summary = dict.fromkeys(("count_ge_extra", "share", "min", "max", "median", "p25", "p75"))
-    if len(values) < 3:
-        explanation = (f"Замало повних місяців історії ({len(values)} < 3), щоб показувати підсумки. "
-                       + (explanation or ""))
-    else:
-        count = sum(1 for v in values if v >= extra)
-        p25, median, p75 = statistics.quantiles(values, n=4, method="inclusive")
-        summary = {"count_ge_extra": count, "share": count / len(values), "min": min(values),
-                   "max": max(values), "median": median, "p25": p25, "p75": p75}
-
+    result = await historical_free_cash_flow(db, current_user.id, extra, months)
     return {
-        "extra_uah": extra,
-        "n_months_requested": months,
-        "n_months_used": len(used),
-        "months": series,
-        **summary,
-        "data_stale": window["data_stale"],
-        "explanation": explanation,
+        **result,
         "historical_not_forecast": True,
         "disclaimer": AFFORDABILITY_DISCLAIMER,
     }
@@ -484,7 +444,8 @@ async def latest_plan(
     """Повертає збережений план без перерахунку MILP.
 
     Містить порівняння стратегій, помісячний розклад до погашення, додатковий
-    платіж і is_stale — чи змінився склад боргів після побудови плану (None,
+    платіж, months_to_payoff (null, якщо план не погашає борги за горизонт; тоді
+    horizon_months — горизонт плану, інакше null) і is_stale — чи змінився склад боргів після побудови плану (None,
     якщо відбиток не збережено). Повертає 404, якщо планів ще немає.
     """
     result = await db.execute(
@@ -501,6 +462,10 @@ async def latest_plan(
         )
 
     milp_data = plan.plan_data.get("milp", {})
+    # Колонка months_to_payoff для плану, що не погашає борги за горизонт,
+    # зберігає сам горизонт; справжнє значення — у plan_data["milp"].
+    months_to_payoff = milp_data.get("months_to_payoff") if milp_data else plan.months_to_payoff
+    horizon_months = plan.months_to_payoff if milp_data and months_to_payoff is None else None
 
     # Актуальність: якщо відбиток збережено — порівнюємо з поточними активними
     # боргами; якщо ні — None.
@@ -515,7 +480,8 @@ async def latest_plan(
         "plan_id": plan.id,
         "forecast_id": plan.forecast_id,
         "generated_at": plan.generated_at.isoformat(),
-        "months_to_payoff": plan.months_to_payoff,
+        "months_to_payoff": months_to_payoff,
+        "horizon_months": horizon_months,
         "total_interest_paid": plan.total_interest_paid,
         "status": plan.status,
         "comparison": {

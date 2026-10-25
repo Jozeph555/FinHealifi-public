@@ -5,10 +5,11 @@
 - avalanche, snowball, minimum — евристики, симуляція місяць за місяцем;
 - milp — оптимальний план з MILP-моделі (app/services/milp_optimizer.py).
 
-Порівняння MILP з евристиками відповідає постановці Rios-Solis et al. (2017).
+MILP-модель — спрощена версія RPML (Rios-Solis та ін., 2017) без штрафів за
+недоплату, зі сталим бюджетом.
 """
 from app.services.milp_optimizer import optimize_milp
-from app.services.debt_rules import revolving_min_payment
+from app.services.debt_rules import debt_min_payment
 
 
 def optimize_debt_repayment(debts: list[dict], monthly_budget: float, months: int = 24) -> dict:
@@ -36,9 +37,12 @@ def simulate_strategy(debts: list[dict], monthly_budget: float,
                        months: int, strategy: str) -> dict:
     """Симулює евристичну стратегію погашення місяць за місяцем.
 
-    Щомісяця нараховує відсотки, сплачує мінімальні платежі, а залишок бюджету
-    спрямовує на один борг: з найвищою ставкою (avalanche), з найменшим
-    залишком (snowball) або нікуди (minimum).
+    Щомісяця нараховує відсотки, сплачує мінімальні платежі
+    (debt_rules.debt_min_payment від балансу на початок місяця), а залишок бюджету
+    спрямовує на борги в порядку стратегії: за спаданням ставки (avalanche) або
+    за зростанням залишку (snowball). Якщо цільовий борг закривається, решта
+    бюджету в тому ж місяці переходить на наступний борг у цьому порядку. Для
+    minimum залишок бюджету не використовується.
 
     Args:
         debts: Борги з ключами name, balance, monthly_rate, debt_type, min_payment.
@@ -52,13 +56,6 @@ def simulate_strategy(debts: list[dict], monthly_budget: float,
     """
     balances = {d["name"]: d["balance"] for d in debts}
     rates = {d["name"]: d["monthly_rate"] for d in debts}
-    min_payments = {}
-    for d in debts:
-        if d["debt_type"] == "revolving":
-            min_payments[d["name"]] = None
-        else:
-            min_payments[d["name"]] = d["min_payment"]
-
     total_interest_paid = 0
     months_to_payoff = months
     monthly_log = []
@@ -68,6 +65,7 @@ def simulate_strategy(debts: list[dict], monthly_budget: float,
             months_to_payoff = month - 1
             break
 
+        balances_start = dict(balances)
         interest_this_month = {}
         for name, balance in balances.items():
             if balance > 0:
@@ -84,25 +82,27 @@ def simulate_strategy(debts: list[dict], monthly_budget: float,
             if balances[name] <= 0:
                 payments[name] = 0
                 continue
-            if d["debt_type"] == "revolving":
-                min_pay = revolving_min_payment(balances[name])
-            else:
-                min_pay = min_payments[name]
+            min_pay = debt_min_payment(d["debt_type"], balances_start[name], d["monthly_rate"],
+                                       d.get("min_payment"))
+            # balance·(1 + r) і balance + balance·r можуть різнитися в останньому
+            # знаку float; платіж не перевищує фактичного залишку.
             min_pay = min(min_pay, balances[name])
             payments[name] = min_pay
             remaining_budget -= min_pay
 
-        if remaining_budget > 0:
+        if remaining_budget > 0 and strategy in ("avalanche", "snowball"):
             active_debts = [d for d in debts if balances[d["name"]] > 0]
             if strategy == "avalanche":
-                target = max(active_debts, key=lambda d: d["monthly_rate"]) if active_debts else None
-            elif strategy == "snowball":
-                target = min(active_debts, key=lambda d: balances[d["name"]]) if active_debts else None
+                order = sorted(active_debts, key=lambda d: d["monthly_rate"], reverse=True)
             else:
-                target = None
-            if target:
+                order = sorted(active_debts, key=lambda d: balances[d["name"]])
+            # Залишок після закриття боргу переходить на наступний у порядку стратегії.
+            for target in order:
+                if remaining_budget <= 0:
+                    break
                 extra = min(remaining_budget, balances[target["name"]] - payments[target["name"]])
                 payments[target["name"]] += extra
+                remaining_budget -= extra
 
         for name in balances:
             balances[name] = max(0, balances[name] - payments[name])

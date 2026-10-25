@@ -1,12 +1,12 @@
 """
 Тести POST /transactions/{id}/mark-reimbursement і врахування повернень
-спільних витрат у прогнозі й раднику.
+спільних витрат у прогнозі.
 
 Ендпоінт позначає додатну pending-транзакцію category_method='reimbursement',
-не змінюючи початкової витрати; forecasting._load_monthly_series і
-advisor_context.build_advisor_context віднімають такі суми від витрат тієї ж
-категорії за той самий місяць. Функції викликаються з db_session, без
-HTTP-шару.
+не змінюючи початкової витрати; forecasting._load_monthly_series віднімає такі
+суми від витрат тієї ж категорії за той самий місяць. Контекст радника
+(advisor_context.build_advisor_context) категорій витрат не містить. Функції
+викликаються з db_session, без HTTP-шару.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -22,6 +22,7 @@ from app.api.transactions import (
 )
 from app.services.forecasting import _load_monthly_series
 from app.services.advisor_context import build_advisor_context
+from app.services.llm_advisor import _format_context
 
 
 async def _make_expense(db_session, real_user, date: datetime, amount_uah: float, category: str):
@@ -161,7 +162,7 @@ async def test_forecasting_ignores_unrelated_positive_expense_category_rows(db_s
 
 # --- віднімання в advisor_context.build_advisor_context ------------------
 
-async def test_advisor_context_nets_reimbursement_in_top_category(db_session, real_user):
+async def test_advisor_context_has_no_spending_categories(db_session, real_user):
     recent = datetime.now(timezone.utc) - timedelta(days=3)
     await _make_expense(db_session, real_user, recent, -1000, "Кафе та ресторани")
 
@@ -172,7 +173,7 @@ async def test_advisor_context_nets_reimbursement_in_top_category(db_session, re
             current_user=real_user, db=db_session,
         )
 
-    context = await build_advisor_context(real_user.id, session=db_session)
+    text = _format_context(await build_advisor_context(real_user.id, session=db_session))
 
-    assert context["top_spending_category"] == "Кафе та ресторани"
-    assert context["top_spending_category_amount"] == 250.0
+    assert "Кафе" not in text
+    assert "250" not in text and "1 000" not in text
