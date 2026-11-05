@@ -1,10 +1,7 @@
 import { useState, useEffect } from "react";
 import api from "../services/api";
-
-function formatMoney(value) {
-  if (value === null || value === undefined) return "—";
-  return new Intl.NumberFormat("uk-UA", { maximumFractionDigits: 0 }).format(value) + " грн";
-}
+import { formatUah } from "../utils/money";
+import AmountRow, { RowAction } from "../components/ui/AmountRow";
 
 const FALLBACK_ASSET_TYPES = ["Депозит", "Інвестиції", "Нерухомість", "Готівка", "Інше"];
 const CUSTOM_TYPE_VALUE = "__custom__";
@@ -300,35 +297,30 @@ export default function Assets() {
                   </div>
                 </form>
               ) : (
-                <div
+                <AmountRow
                   key={a.id}
-                  className="flex items-center justify-between rounded-lg border border-ink/10 p-3"
-                >
-                  <div>
-                    <p className="font-medium text-ink">{a.name}</p>
-                    <p className="text-xs text-ink/50">
-                      {a.asset_type} • {LIQUIDITY_LABELS[a.liquidity_level] || a.liquidity_level} ліквідність
-                      {a.liquidity_days != null ? `, ${a.liquidity_days} дн. до доступу` : ""}
-                      {a.annual_rate != null ? ` • ${a.annual_rate}% річних` : ""}
-                    </p>
-                    {a.rate_note && <p className="text-xs text-ink/40">{a.rate_note}</p>}
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono text-lg text-forest">{formatMoney(a.current_amount)}</span>
-                    <button
-                      onClick={() => startEdit(a)}
-                      className="text-xs text-ink/40 hover:text-forest"
-                    >
-                      Редагувати
-                    </button>
-                    <button
-                      onClick={() => handleArchive(a.id)}
-                      className="text-xs text-ink/40 hover:text-brick"
-                    >
-                      Архівувати
-                    </button>
-                  </div>
-                </div>
+                  title={a.name}
+                  meta={
+                    <>
+                      <p>
+                        {a.asset_type} • {LIQUIDITY_LABELS[a.liquidity_level] || a.liquidity_level} ліквідність
+                        {a.liquidity_days != null ? `, ${a.liquidity_days} дн. до доступу` : ""}
+                        {a.annual_rate != null ? ` • ${a.annual_rate}% річних` : ""}
+                      </p>
+                      {a.rate_note && <p className="text-ink/40">{a.rate_note}</p>}
+                    </>
+                  }
+                  amount={formatUah(a.current_amount)}
+                  amountClassName="text-lg text-forest"
+                  actions={
+                    <>
+                      <RowAction onClick={() => startEdit(a)}>Редагувати</RowAction>
+                      <RowAction onClick={() => handleArchive(a.id)} danger>
+                        Архівувати
+                      </RowAction>
+                    </>
+                  }
+                />
               )
             )}
           </div>

@@ -25,10 +25,45 @@ MILP-модель оптимального погашення боргів (PuLP
 
 Бінарні змінні active[i,t] роблять задачу змішаною цілочисельною (MILP):
 умова «мінімальний платіж, поки борг не погашений» не виражається в чистому LP.
-"""
-from pulp import LpProblem, LpMinimize, LpVariable, LpBinary, lpSum, PULP_CBC_CMD, LpStatus
 
+Розв'язувач CBC отримує ліміт часу MILP_TIME_LIMIT_SEC. solve_in_thread запускає
+розв'язання в окремому потоці із загальним лімітом часу, щоб не блокувати event loop.
+"""
+import asyncio
+
+from pulp import (
+    LpProblem, LpMinimize, LpVariable, LpBinary, lpSum, PULP_CBC_CMD, LpStatus,
+    LpStatusOptimal, LpSolutionOptimal,
+)
+
+from app.core.config import MILP_TIME_LIMIT_SEC
 from app.services.debt_rules import min_payment_lower_bounds
+
+# Запас понад ліміт CBC для побудови моделі та обміну файлами з CBC, секунди.
+MILP_TIMEOUT_GRACE_SEC = 5.0
+
+# Статус, коли CBC зупинився за лімітом часу з допустимим, але не доведено
+# оптимальним розв'язком.
+STATUS_TIME_LIMIT = "Time Limit"
+
+
+async def solve_in_thread(solver_fn, *args):
+    """Виконує solver_fn(*args) в окремому потоці, не блокуючи event loop.
+
+    Загальний ліміт очікування — MILP_TIME_LIMIT_SEC + MILP_TIMEOUT_GRACE_SEC.
+    Після його вичерпання потік не переривається: CBC завершується сам, коли
+    вичерпає свій timeLimit.
+
+    Returns:
+        Результат solver_fn.
+
+    Raises:
+        TimeoutError: розв'язання не завершилося за загальний ліміт.
+    """
+    return await asyncio.wait_for(
+        asyncio.to_thread(solver_fn, *args),
+        timeout=MILP_TIME_LIMIT_SEC + MILP_TIMEOUT_GRACE_SEC,
+    )
 
 
 def optimize_milp(debts: list[dict], monthly_budget: float, months: int = 36) -> dict:
@@ -42,7 +77,9 @@ def optimize_milp(debts: list[dict], monthly_budget: float, months: int = 36) ->
     Returns:
         Словник зі статусом солвера (status), months_to_payoff (None, якщо борги
         не погашено за горизонт), total_interest_paid, monthly_log (до місяця
-        погашення або на весь горизонт) і final_balances.
+        погашення або на весь горизонт) і final_balances. Статус "Optimal" лише
+        для доведено оптимального розв'язку; розв'язок, знайдений до вичерпання
+        ліміту часу без доведення оптимальності, має статус STATUS_TIME_LIMIT.
     """
     names = [d["name"] for d in debts]
     balance0 = {d["name"]: d["balance"] for d in debts}
@@ -91,9 +128,13 @@ def optimize_milp(debts: list[dict], monthly_budget: float, months: int = 36) ->
 
     prob += lpSum(interest[(n, t)] for n in names for t in range(1, months + 1))
 
-    solver = PULP_CBC_CMD(msg=0)
+    solver = PULP_CBC_CMD(msg=0, timeLimit=MILP_TIME_LIMIT_SEC)
     prob.solve(solver)
     status = LpStatus[prob.status]
+    # PuLP позначає зупинку за лімітом часу з допустимим розв'язком як
+    # LpStatusOptimal; відрізняє її лише sol_status.
+    if prob.status == LpStatusOptimal and prob.sol_status != LpSolutionOptimal:
+        status = STATUS_TIME_LIMIT
 
     total_interest_paid = sum(interest[(n, t)].value() or 0 for n in names for t in range(1, months + 1))
 

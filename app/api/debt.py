@@ -4,13 +4,15 @@
 - CRUD боргів: POST, GET, PATCH /debt.
 - POST /debt/optimize — план з додатковим платежем, який задає користувач.
 - GET /debt/affordability — історичний вільний грошовий потік, лише читання.
-- GET /debt/plan/latest — збережений план і ознака його актуальності.
+- GET /debt/plan/latest — остання чернетка плану і ознака її актуальності.
 - POST /debt/optimize-raw — розрахунок для довільних боргів без збереження.
-- POST /debt/optimize-from-forecast — план з бюджетом з прогнозу (застарілий,
-  інтерфейс його не використовує).
+
+Залишок боргу у відповідях і розрахунках береться з журналу
+(app/services/debt_ledger.py); зміна залишку через PATCH створює звірку.
 """
 import math
 import uuid
+from datetime import date
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,17 +20,54 @@ from pydantic import BaseModel, BeforeValidator, Field, StringConstraints, field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_current_user
+from app.api.deps import get_db, get_current_user, get_today, resolve_today
 from app.models.user import User
 from app.models.debt import Debt
-from app.models.forecast import Forecast
 from app.models.milp_plan import MilpPlan
-from app.services.debt_fingerprint import debts_fingerprint
-from app.services.debt_optimizer import optimize_debt_repayment
+from app.services import debt_ledger as ledger
+from app.services.debt_fingerprint import debts_fingerprint, debts_structure_fingerprint, draft_changes
+from app.services.debt_optimizer import SOLVER_NOT_FINISHED_STATUSES, optimize_debt_repayment_async
 from app.services.debt_rules import debt_min_payment
 from app.services.affordability import historical_free_cash_flow
 
 router = APIRouter(prefix="/debt", tags=["debt"])
+
+# Пояснення для користувача, коли план складено за avalanche (fallback=True).
+FALLBACK_PLAN_NOTE = (
+    "Розрахований план зараз не вдалося скласти, тому показано варіант «спочатку найдорожчий борг»."
+)
+
+
+# Відповідь 503, коли розв'язувач не встиг завершити розрахунок.
+SOLVER_NOT_FINISHED_DETAIL = (
+    "Розрахований план зараз не вдалося скласти: розрахунок не встиг завершитися. "
+    "Спробуй ще раз трохи пізніше."
+)
+
+
+def _calc_error_detail(exc: Exception, suffix: str = "") -> str:
+    """Текст помилки розрахунку; причина з exc додається лише непорожньою."""
+    reason = str(exc).strip()
+    text = "Не вдалося розрахувати план" + (f": {reason}" if reason else "") + "."
+    return f"{text} {suffix}".strip()
+
+
+def _raise_calc_error(exc: Exception, status_code: int, suffix: str = "") -> None:
+    """Перетворює виняток розрахунку на HTTPException; TimeoutError — 503.
+
+    Raises:
+        HTTPException: 503 з SOLVER_NOT_FINISHED_DETAIL для TimeoutError,
+            інакше status_code з текстом _calc_error_detail.
+    """
+    if isinstance(exc, TimeoutError):
+        raise HTTPException(status_code=503, detail=SOLVER_NOT_FINISHED_DETAIL) from exc
+    raise HTTPException(status_code=status_code, detail=_calc_error_detail(exc, suffix)) from exc
+
+
+def _fallback_fields(milp: dict) -> dict:
+    """Повертає поля fallback і plan_note для відповіді за результатом milp."""
+    fallback = bool(milp.get("fallback", False))
+    return {"fallback": fallback, "plan_note": FALLBACK_PLAN_NOTE if fallback else None}
 
 
 def _reject_non_finite(value):
@@ -121,13 +160,26 @@ class DebtResponse(BaseModel):
         from_attributes = True
 
 
+def _state_response(state: ledger.DebtState) -> DebtResponse:
+    """Борг з журнальним залишком у форматі відповіді."""
+    return DebtResponse(id=state.id, name=state.name, balance=state.balance, monthly_rate=state.monthly_rate,
+                        min_payment=state.min_payment, debt_type=state.debt_type, is_active=state.is_active)
+
+
+async def _debt_response(db: AsyncSession, debt: Debt, today: date) -> DebtResponse:
+    """Відповідь про борг із залишком на сьогодні з журналу."""
+    return _state_response((await ledger.debt_states(db, debt.user_id, [debt], today))[0])
+
+
 @router.post("", response_model=DebtResponse, status_code=201)
 async def create_debt(
     request: DebtCreateRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    today: date = Depends(get_today),
 ):
     """Створює борг; 422, якщо installment-борг не має мінімального платежу."""
+    today = resolve_today(today)
     _require_installment_min_payment(request.debt_type, request.min_payment)
 
     debt = Debt(
@@ -141,8 +193,12 @@ async def create_debt(
         is_active=True,
     )
     db.add(debt)
+    await db.flush()
+    await ledger.upsert_check(db, current_user.id, debt.id, today, ledger.uah_to_kop(request.balance),
+                              "debt_created")
     await db.commit()
     await db.refresh(debt)
+    # Щойно створений борг: залишок журналу дорівнює debts.balance.
     return debt
 
 
@@ -151,13 +207,19 @@ async def list_debts(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     include_inactive: bool = False,
+    today: date = Depends(get_today),
 ):
-    """Повертає активні борги користувача; з include_inactive — також погашені."""
+    """Повертає активні борги користувача; з include_inactive — також погашені.
+
+    balance — залишок на сьогодні з журналу звірок і платежів.
+    """
+    today = resolve_today(today)
     query = select(Debt).where(Debt.user_id == current_user.id)
     if not include_inactive:
         query = query.where(Debt.is_active == True)
-    result = await db.execute(query)
-    return result.scalars().all()
+    debts = (await db.execute(query.order_by(Debt.created_at, Debt.id))).scalars().all()
+    states = await ledger.debt_states(db, current_user.id, list(debts), today)
+    return [_state_response(s) for s in states]
 
 
 @router.patch("/{debt_id}", response_model=DebtResponse)
@@ -166,12 +228,15 @@ async def update_debt(
     request: DebtUpdateRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    today: date = Depends(get_today),
 ):
     """Частково оновлює борг (лише передані поля).
 
-    Повертає 404, якщо борг не знайдено, і 422, якщо після змін installment-борг
+    Новий balance не перезаписує поле боргу, а створює звірку 'manual_edit' на
+    сьогодні: з неї рахується залишок далі. Повертає 404, якщо борг не знайдено, і 422, якщо після змін installment-борг
     не має мінімального платежу.
     """
+    today = resolve_today(today)
     result = await db.execute(
         select(Debt).where(Debt.id == debt_id, Debt.user_id == current_user.id)
     )
@@ -184,12 +249,16 @@ async def update_debt(
         update_data.get("debt_type", debt.debt_type),
         update_data["min_payment"] if "min_payment" in update_data else debt.min_payment,
     )
+    new_balance = update_data.pop("balance", None)
     for field, value in update_data.items():
         setattr(debt, field, value)
+    if new_balance is not None:
+        await ledger.upsert_check(db, current_user.id, debt.id, today, ledger.uah_to_kop(new_balance),
+                                  "manual_edit")
 
     await db.commit()
     await db.refresh(debt)
-    return debt
+    return await _debt_response(db, debt, today)
 
 
 # --- Оптимізація ---
@@ -212,103 +281,17 @@ class DebtOptimizeRequest(BaseModel):
 
 @router.post("/optimize-raw")
 async def optimize(request: DebtOptimizeRequest):
-    """Рахує чотири стратегії для боргів і бюджету з тіла запиту; нічого не зберігає."""
+    """Рахує чотири стратегії для боргів і бюджету з тіла запиту; нічого не зберігає.
+
+    Якщо MILP-розв'язок не вдався, milp містить результат «спочатку найдорожчий
+    борг» з fallback=true. Повертає 503, якщо розв'язувач не встиг, а запасного
+    плану немає, і 500 у разі іншої помилки розрахунку.
+    """
     try:
         debts = [d.model_dump() for d in request.debts]
-        return optimize_debt_repayment(debts, request.monthly_budget, request.months)
+        return await optimize_debt_repayment_async(debts, request.monthly_budget, request.months)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/optimize-from-forecast")
-async def optimize_from_forecast(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-    months: int = 36,
-):
-    """Будує план з бюджетом free_cash_flow з найновішого прогнозу (застарілий ендпоінт).
-
-    Бере активні борги користувача, зберігає результат у milp_plans з
-    посиланням на прогноз.
-    """
-    debts_result = await db.execute(
-        select(Debt).where(Debt.user_id == current_user.id, Debt.is_active == True)
-    )
-    debts = debts_result.scalars().all()
-    if not debts:
-        raise HTTPException(
-            status_code=400,
-            detail="Немає активних боргів. Додай хоча б один через POST /debt",
-        )
-
-    forecast_result = await db.execute(
-        select(Forecast)
-        .where(Forecast.user_id == current_user.id)
-        .order_by(Forecast.generated_at.desc())
-        .limit(1)
-    )
-    forecast = forecast_result.scalar_one_or_none()
-    if forecast is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Немає прогнозу. Виклич POST /forecast/generate спочатку",
-        )
-
-    if forecast.free_cash_flow <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Прогнозований вільний грошовий потік від'ємний або нульовий "
-                f"({forecast.free_cash_flow} грн) — оптимізація боргів неможлива "
-                f"без вільного бюджету. Це реальний сигнал, не помилка коду."
-            ),
-        )
-
-    debts_dicts = [
-        {
-            "name": d.name,
-            "balance": d.balance,
-            "monthly_rate": d.monthly_rate,
-            "min_payment": d.min_payment,
-            "debt_type": d.debt_type,
-        }
-        for d in debts
-    ]
-
-    try:
-        strategies = optimize_debt_repayment(debts_dicts, forecast.free_cash_flow, months)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"MILP-оптимізація впала: {e}")
-
-    milp_result = strategies["milp"]
-
-    plan = MilpPlan(
-        id=str(uuid.uuid4()),
-        user_id=current_user.id,
-        forecast_id=forecast.id,
-        months_to_payoff=milp_result["months_to_payoff"] or months,
-        total_interest_paid=milp_result["total_interest_paid"],
-        plan_data=strategies,  # усі 4 стратегії для порівняння
-        status="active",
-    )
-    db.add(plan)
-    await db.commit()
-    await db.refresh(plan)
-
-    return {
-        "plan_id": plan.id,
-        "forecast_id": forecast.id,
-        "monthly_budget_used": forecast.free_cash_flow,
-        "months_to_payoff": milp_result["months_to_payoff"],
-        "total_interest_paid": milp_result["total_interest_paid"],
-        "comparison": {
-            strategy: {
-                "months_to_payoff": data["months_to_payoff"],
-                "total_interest_paid": data["total_interest_paid"],
-            }
-            for strategy, data in strategies.items()
-        },
-    }
+        _raise_calc_error(e, 500)
 
 
 # --- План з додатковим платежем і калькулятор спроможності ---
@@ -326,7 +309,7 @@ class ExtraPaymentRequest(BaseModel):
     ]
 
 
-def _min_payment(debt: Debt) -> float:
+def _min_payment(debt: ledger.DebtState) -> float:
     """Повертає поточний мінімальний платіж боргу за правилами debt_rules."""
     return debt_min_payment(debt.debt_type, debt.balance, debt.monthly_rate, debt.min_payment)
 
@@ -337,21 +320,29 @@ async def optimize_with_extra(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     months: int = 36,
+    today: date = Depends(get_today),
 ):
     """Будує й зберігає план погашення активних боргів з додатковим платежем.
 
     Загальний місячний бюджет = сума поточних мінімальних платежів +
-    extra_monthly_uah. План зберігається в milp_plans з forecast_id = NULL,
-    додатковим платежем і відбитком боргів.
+    extra_monthly_uah; залишки — на сьогодні з журналу. План зберігається в
+    milp_plans як чернетка (plan_state='draft') з додатковим платежем,
+    відбитками боргів і стартовими залишками за debt_id
+    (plan_data["milp"]["start_balances"]); прийняти її — POST
+    /debt/plans/{plan_id}/accept.
 
-    Повертає 409, якщо активних боргів немає, і 422, якщо план неможливий або
-    солвер не впорався (план тоді не зберігається).
+    Якщо MILP-розв'язок не вдався (ліміт часу, помилка), а варіант «спочатку
+    найдорожчий борг» вкладається в бюджет, зберігається він: fallback=true,
+    status — статус розв'язувача, plan_note — пояснення для користувача.
+
+    Повертає 409, якщо активних боргів немає; 422, якщо план неможливий; 503,
+    якщо розв'язувач не встиг (Time Limit, Not Solved, Timeout), а запасного
+    плану немає. В обох останніх випадках план не зберігається.
     """
-    debts = (await db.execute(
-        select(Debt).where(Debt.user_id == current_user.id, Debt.is_active == True)  # noqa: E712
-    )).scalars().all()
+    today = resolve_today(today)
+    debts = await ledger.active_debt_states(db, current_user.id, today)
     if not debts:
-        raise HTTPException(status_code=409, detail="Немає активних боргів. Додай хоча б один борг через POST /debt.")
+        raise HTTPException(status_code=409, detail="Немає активних боргів. Додай хоча б один борг на сторінці «Борги».")
 
     extra = request.extra_monthly_uah
     min_total = sum(_min_payment(d) for d in debts)
@@ -363,20 +354,24 @@ async def optimize_with_extra(
     ]
     hint = "Спробуй збільшити додатковий платіж або перевір ставки й мінімальні платежі боргів."
     try:
-        strategies = optimize_debt_repayment(debts_dicts, budget, months)
+        strategies = await optimize_debt_repayment_async(debts_dicts, budget, months)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Не вдалося розрахувати план: {e}. {hint}")
+        _raise_calc_error(e, 422, hint)
 
     milp = strategies["milp"]
-    if milp["status"] != "Optimal":
+    if milp["status"] in SOLVER_NOT_FINISHED_STATUSES and not milp.get("fallback"):
+        raise HTTPException(status_code=503, detail=SOLVER_NOT_FINISHED_DETAIL)
+    if milp["status"] != "Optimal" and not milp.get("fallback"):
         raise HTTPException(
             status_code=422,
             detail=(
-                f"План неможливий за місячного бюджету {budget:.0f} грн (мінімальні платежі "
-                f"{min_total:.0f} + додатковий {extra:.0f}); статус солвера: {milp['status']}. {hint}"
+                f"Не вдалося розрахувати план за цих умов: місячний бюджет {budget:.0f} грн "
+                f"(обов'язкові платежі {min_total:.0f} + додатковий {extra:.0f}). {hint}"
             ),
         )
 
+    # Стартові залишки за debt_id: з ними версія плану порівнює склад свого розкладу.
+    milp["start_balances"] = {d.id: d.balance for d in debts}
     plan = MilpPlan(
         id=str(uuid.uuid4()),
         user_id=current_user.id,
@@ -384,9 +379,10 @@ async def optimize_with_extra(
         months_to_payoff=milp["months_to_payoff"] or months,
         total_interest_paid=milp["total_interest_paid"],
         plan_data=strategies,
-        status="active",
+        status="draft",
         extra_monthly_uah=extra,
         debts_fingerprint=debts_fingerprint(debts),
+        debts_structure_fingerprint=debts_structure_fingerprint(debts),
     )
     db.add(plan)
     await db.commit()
@@ -394,12 +390,14 @@ async def optimize_with_extra(
 
     return {
         "plan_id": plan.id,
+        "plan_state": "draft",
         "forecast_id": None,
         "extra_monthly_uah": extra,
         "min_payments_total_uah": min_total,
         "total_monthly_payment_uah": budget,
         "horizon_months": months,
         "status": milp["status"],
+        **_fallback_fields(milp),
         "months_to_payoff": milp["months_to_payoff"],
         "total_interest_paid": milp["total_interest_paid"],
         "comparison": {
@@ -440,14 +438,23 @@ async def affordability(
 async def latest_plan(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    today: date = Depends(get_today),
 ):
-    """Повертає збережений план без перерахунку MILP.
+    """Повертає останню чернетку плану без перерахунку MILP.
 
     Містить порівняння стратегій, помісячний розклад до погашення, додатковий
     платіж, months_to_payoff (null, якщо план не погашає борги за горизонт; тоді
-    horizon_months — горизонт плану, інакше null) і is_stale — чи змінився склад боргів після побудови плану (None,
-    якщо відбиток не збережено). Повертає 404, якщо планів ще немає.
+    horizon_months — горизонт плану, інакше null). Зміни боргів після побудови:
+    structure_changed — змінився склад активних боргів, тип, ставка чи
+    мінімальний платіж; balances_changed — за того самого складу змінилися лише
+    залишки (обидва null, якщо відбиток не збережено). Першу чернетку можна
+    прийняти лише без жодних змін, наступні — без зміни складу.
+    min_payments_total_uah і total_monthly_payment_uah — обов'язкові платежі й
+    разом із додатковим, лише коли змін немає (інакше null). fallback=true і plan_note — план складено за
+    «спочатку найдорожчий борг», бо MILP-розв'язок не вдався. Повертає 404,
+    якщо планів ще немає.
     """
+    today = resolve_today(today)
     result = await db.execute(
         select(MilpPlan)
         .where(MilpPlan.user_id == current_user.id)
@@ -469,12 +476,13 @@ async def latest_plan(
 
     # Актуальність: якщо відбиток збережено — порівнюємо з поточними активними
     # боргами; якщо ні — None.
-    is_stale = None
-    if plan.debts_fingerprint is not None:
-        active_debts = (await db.execute(
-            select(Debt).where(Debt.user_id == current_user.id, Debt.is_active == True)  # noqa: E712
-        )).scalars().all()
-        is_stale = debts_fingerprint(active_debts) != plan.debts_fingerprint
+    active_debts = await ledger.active_debt_states(db, current_user.id, today)
+    balances_changed, structure_changed = draft_changes(plan, active_debts)
+    min_total = None
+    # Борги ті самі, що під час побудови, тож обов'язкові платежі збігаються з бюджетом плану.
+    if balances_changed is False and structure_changed is False:
+        min_total = sum(_min_payment(d) for d in active_debts)
+    total = min_total + plan.extra_monthly_uah if min_total is not None and plan.extra_monthly_uah is not None else None
 
     return {
         "plan_id": plan.id,
@@ -484,6 +492,8 @@ async def latest_plan(
         "horizon_months": horizon_months,
         "total_interest_paid": plan.total_interest_paid,
         "status": plan.status,
+        "plan_state": plan.status,
+        **_fallback_fields(milp_data),
         "comparison": {
             strategy: {
                 "months_to_payoff": data["months_to_payoff"],
@@ -494,5 +504,8 @@ async def latest_plan(
         # Помісячний розклад MILP-плану до повного погашення.
         "monthly_schedule": milp_data.get("monthly_log", []),
         "extra_monthly_uah": plan.extra_monthly_uah,
-        "is_stale": is_stale,
+        "min_payments_total_uah": min_total,
+        "total_monthly_payment_uah": total,
+        "balances_changed": balances_changed,
+        "structure_changed": structure_changed,
     }

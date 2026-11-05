@@ -269,14 +269,15 @@ async def test_post_revolving_with_null_min_payment_ok(client):
 
 # --- зв'язок з планом і список -----------------------------------------------------------
 
-async def test_patch_balance_makes_plan_stale(client):
+async def test_patch_balance_marks_balances_changed(client):
     debt = await _create(client)
     assert (await client.post("/debt/optimize", json={"extra_monthly_uah": 1_000})).status_code == 201
-    assert (await client.get("/debt/plan/latest")).json()["is_stale"] is False
+    assert (await client.get("/debt/plan/latest")).json()["balances_changed"] is False
 
     assert (await client.patch(f"/debt/{debt['id']}", json={"balance": 9_000})).status_code == 200
 
-    assert (await client.get("/debt/plan/latest")).json()["is_stale"] is True
+    body = (await client.get("/debt/plan/latest")).json()
+    assert body["balances_changed"] is True and body["structure_changed"] is False
 
 
 async def test_list_include_inactive_returns_repaid(client):

@@ -102,8 +102,7 @@ frontend/.eslintcache
 # Результати аналітичних скриптів (scripts/analysis/*.py пишуть сюди за замовчуванням)
 scripts/analysis/out/
 
-# Claude Code
-.claude/scheduled_tasks.lock
+# Дампи бази даних
 *.dump
 
 # Зовнішні датасети: дані не в git, лише README з описом вивантаження
@@ -111,3 +110,6 @@ data/external/*
 !data/external/berka/
 data/external/berka/*
 !data/external/berka/README.md
+!data/external/caixabank_tx/
+data/external/caixabank_tx/*
+!data/external/caixabank_tx/README.md

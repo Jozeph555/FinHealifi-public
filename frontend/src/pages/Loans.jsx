@@ -1,10 +1,7 @@
 import { useState, useEffect } from "react";
 import api from "../services/api";
-
-function formatMoney(value) {
-  if (value === null || value === undefined) return "—";
-  return new Intl.NumberFormat("uk-UA", { maximumFractionDigits: 0 }).format(value) + " грн";
-}
+import { formatUah } from "../utils/money";
+import AmountRow, { RowAction } from "../components/ui/AmountRow";
 
 function formatDate(value) {
   // value — календарна дата "YYYY-MM-DD" без часу. new Date(value) трактує її
@@ -243,32 +240,21 @@ export default function Loans() {
                   </div>
                 </form>
               ) : (
-                <div
+                <AmountRow
                   key={l.id}
-                  className="flex items-center justify-between rounded-lg border border-ink/10 p-3"
-                >
-                  <div>
-                    <p className="font-medium text-ink">{l.borrower_name}</p>
-                    <p className="text-xs text-ink/50">
-                      Видано {formatDate(l.issued_at)} • {STATUS_LABELS[l.status] || l.status}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono text-lg text-forest">{formatMoney(l.remaining_amount)}</span>
-                    <button
-                      onClick={() => startEdit(l)}
-                      className="text-xs text-ink/40 hover:text-forest"
-                    >
-                      Редагувати
-                    </button>
-                    <button
-                      onClick={() => handleMarkRepaid(l.id)}
-                      className="text-xs text-ink/40 hover:text-brick"
-                    >
-                      Повністю повернено
-                    </button>
-                  </div>
-                </div>
+                  title={l.borrower_name}
+                  meta={`Видано ${formatDate(l.issued_at)} • ${STATUS_LABELS[l.status] || l.status}`}
+                  amount={formatUah(l.remaining_amount)}
+                  amountClassName="text-lg text-forest"
+                  actions={
+                    <>
+                      <RowAction onClick={() => startEdit(l)}>Редагувати</RowAction>
+                      <RowAction onClick={() => handleMarkRepaid(l.id)} danger>
+                        Повністю повернено
+                      </RowAction>
+                    </>
+                  }
+                />
               )
             )}
           </div>

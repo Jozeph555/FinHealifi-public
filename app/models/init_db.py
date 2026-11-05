@@ -12,6 +12,7 @@ from app.models.debt import Debt
 from app.models.loan import Loan
 from app.models.forecast import Forecast
 from app.models.milp_plan import MilpPlan
+from app.models.debt_plan import DebtBalanceCheck, DebtPayment, DebtPlanMonth, DebtPlanSchedule, DebtPlanVersion
 from app.models.sync_job import SyncJob
 
 

@@ -1,12 +1,14 @@
 """
 Залежності FastAPI: сесія БД і поточний користувач за JWT.
 """
+from datetime import date
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
  
+from app.services.debt_ledger import today_kyiv
 from app.models.database import AsyncSessionLocal
 from app.models.user import User
 from app.core.security import decode_access_token
@@ -47,3 +49,17 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
     return user
+
+
+def get_today() -> date:
+    """Повертає сьогоднішню дату за Europe/Kyiv (у тестах залежність підміняється)."""
+    return today_kyiv()
+
+
+def resolve_today(value) -> date:
+    """Повертає value, якщо це дата; інакше сьогоднішню дату за Europe/Kyiv.
+
+    Потрібне, коли ендпоінт викликається як звичайна функція і замість
+    залежності get_today отримує її маркер.
+    """
+    return value if isinstance(value, date) else today_kyiv()

@@ -14,6 +14,7 @@ from datetime import date
 
 from sqlalchemy import select
 
+from app.services.debt_ledger import today_kyiv, upsert_check
 from app.api.assets import AssetCreateRequest, create_asset
 from app.api.debt import DebtCreateRequest, ExtraPaymentRequest, create_debt, optimize_with_extra
 from app.models.forecast import Forecast
@@ -101,7 +102,8 @@ async def test_stale_plan_gives_reason(db_session, real_user):
     await _make_plan(db_session, real_user)
     plan = await _latest_plan(db_session, real_user)
 
-    debt.balance = 9000.0
+    # Залишок змінюється звіркою: debts.balance — лише запасне значення.
+    await upsert_check(db_session, real_user.id, debt.id, today_kyiv(), 900_000, "manual_edit")
     await db_session.commit()
 
     result, reason = await _estimate_debt_reduction_from_assets(db_session, real_user.id, plan)

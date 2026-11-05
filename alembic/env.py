@@ -21,6 +21,7 @@ from app.models.account import Account
 from app.models.bank import Bank
 from app.models.transaction import Transaction
 from app.models.debt import Debt
+from app.models.debt_plan import DebtBalanceCheck, DebtPayment, DebtPlanMonth, DebtPlanSchedule, DebtPlanVersion
 from app.models.loan import Loan
 from app.models.asset import Asset
 from app.models.forecast import Forecast
@@ -37,7 +38,9 @@ if not db_url:
     raise RuntimeError("DATABASE_URL не знайдено в .env")
 config.set_main_option("sqlalchemy.url", db_url)
  
-if config.config_file_name is not None:
+# Передане ззовні з'єднання (config.attributes["connection"]) означає виклик
+# з коду: логування застосунку тоді не переналаштовується.
+if config.config_file_name is not None and config.attributes.get("connection") is None:
     fileConfig(config.config_file_name)
  
 target_metadata = Base.metadata
@@ -56,6 +59,12 @@ def run_migrations_offline() -> None:
  
  
 def run_migrations_online() -> None:
+    external = config.attributes.get("connection")
+    if external is not None:
+        context.configure(connection=external, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+        return
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

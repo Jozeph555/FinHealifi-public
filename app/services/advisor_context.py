@@ -18,12 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import AsyncSessionLocal
 from app.models.milp_plan import MilpPlan
-from app.models.debt import Debt
 from app.models.asset import Asset
 from app.services.affordability import historical_free_cash_flow
 from app.services.debt_fingerprint import debts_fingerprint
+from app.services.debt_ledger import DebtState, active_debt_states
 from app.services.debt_rules import debt_min_payment
-from app.services.milp_optimizer import optimize_milp
+from app.services.milp_optimizer import optimize_milp, solve_in_thread
 
 logger = logging.getLogger(__name__)
 
@@ -158,10 +158,7 @@ async def _find_asset_arbitrage(session: AsyncSession, user_id: str, milp_data: 
     if not assets:
         return None
 
-    debts_result = await session.execute(
-        select(Debt).where(Debt.user_id == user_id, Debt.is_active == True)
-    )
-    debts = debts_result.scalars().all()
+    debts = await active_debt_states(session, user_id)
 
     best = None
     for asset in assets:
@@ -186,7 +183,7 @@ async def _find_asset_arbitrage(session: AsyncSession, user_id: str, milp_data: 
     return best
 
 
-def _usable_plan(plan: MilpPlan | None, debts: list[Debt]) -> tuple[MilpPlan | None, str | None]:
+def _usable_plan(plan: MilpPlan | None, debts: list[DebtState]) -> tuple[MilpPlan | None, str | None]:
     """Повертає план, якщо він актуальний для поточних боргів, або причину, чому ні.
 
     План актуальний, якщо його відбиток боргів збігається з відбитком поточних
@@ -206,12 +203,12 @@ def _usable_plan(plan: MilpPlan | None, debts: list[Debt]) -> tuple[MilpPlan | N
     return plan, None
 
 
-def _min_payments_total(debts: list[Debt]) -> float:
+def _min_payments_total(debts: list[DebtState]) -> float:
     """Повертає суму обов'язкових платежів активних боргів за правилом debt_rules."""
     return sum(debt_min_payment(d.debt_type, d.balance, d.monthly_rate, d.min_payment) for d in debts)
 
 
-def _plan_budget(plan: MilpPlan | None, debts: list[Debt]) -> tuple[float | None, str | None]:
+def _plan_budget(plan: MilpPlan | None, debts: list[DebtState]) -> tuple[float | None, str | None]:
     """Повертає місячний бюджет збереженого плану або причину, чому його немає.
 
     Бюджет = сума поточних мінімальних платежів активних боргів +
@@ -230,7 +227,7 @@ def _plan_budget(plan: MilpPlan | None, debts: list[Debt]) -> tuple[float | None
     return _min_payments_total(debts) + plan.extra_monthly_uah, None
 
 
-def _debt_dicts(debts: list[Debt]) -> list[dict]:
+def _debt_dicts(debts: list[DebtState]) -> list[dict]:
     """Перетворює борги з БД на словники для оптимізаторів."""
     return [
         {"name": d.name, "balance": d.balance, "monthly_rate": d.monthly_rate,
@@ -257,9 +254,10 @@ async def _estimate_debt_reduction_from_assets(
     """Оцінює сценарій одноразового погашення боргів заощадженнями.
 
     Сума активів з ліквідністю high/medium застосовується до боргів у порядку
-    спадання ставки. MILP-солвер запускається двічі — на поточних балансах і на
-    зменшених — з бюджетом збереженого плану (_plan_budget); результат —
-    різниця. Базовий прогін має збігатися зі збереженим планом за сумарною
+    спадання ставки. MILP-солвер запускається двічі в окремому потоці
+    (solve_in_thread) — на поточних балансах і на зменшених — з бюджетом
+    збереженого плану (_plan_budget); результат — різниця; без розв'язку
+    "Optimal" оцінки немає. Базовий прогін має збігатися зі збереженим планом за сумарною
     переплатою з допуском WHAT_IF_PLAN_TOLERANCE_UAH; інакше оцінка не
     повертається, а розбіжність логується.
 
@@ -273,10 +271,7 @@ async def _estimate_debt_reduction_from_assets(
     if total_applicable <= 0:
         return None, None
 
-    debts_result = await session.execute(
-        select(Debt).where(Debt.user_id == user_id, Debt.is_active == True)
-    )
-    debts = debts_result.scalars().all()
+    debts = await active_debt_states(session, user_id)
     if not debts:
         return None, None
 
@@ -297,10 +292,10 @@ async def _estimate_debt_reduction_from_assets(
         remaining -= pay
 
     try:
-        baseline = optimize_milp(baseline_debts, budget, WHAT_IF_HORIZON_MONTHS)
-        adjusted = optimize_milp(adjusted_debts, budget, WHAT_IF_HORIZON_MONTHS)
+        baseline = await solve_in_thread(optimize_milp, baseline_debts, budget, WHAT_IF_HORIZON_MONTHS)
+        adjusted = await solve_in_thread(optimize_milp, adjusted_debts, budget, WHAT_IF_HORIZON_MONTHS)
     except Exception:
-        logger.exception("what-if за заощадженнями: MILP-солвер впав (user_id=%s)", user_id)
+        logger.exception("what-if за заощадженнями: MILP-солвер впав або не вклався в ліміт часу (user_id=%s)", user_id)
         return None, None
     if baseline["status"] != "Optimal" or adjusted["status"] != "Optimal":
         return None, None
@@ -330,7 +325,7 @@ async def _estimate_debt_reduction_from_assets(
 
 # --- Речення контексту -----------------------------------------------------
 
-def _plan_sentences(plan: MilpPlan, debts: list[Debt], min_total: float) -> list[str]:
+def _plan_sentences(plan: MilpPlan, debts: list[DebtState], min_total: float) -> list[str]:
     """Речення про бюджет на борги, кожен борг і підсумок розрахованого плану."""
     milp = plan.plan_data.get("milp", {})
     mandatory = int(format_uah(min_total).replace(" ", ""))
@@ -368,7 +363,7 @@ def _plan_sentences(plan: MilpPlan, debts: list[Debt], min_total: float) -> list
     return sentences
 
 
-def _focus_debt_sentence(debts: list[Debt], first_month: dict) -> str | None:
+def _focus_debt_sentence(debts: list[DebtState], first_month: dict) -> str | None:
     """Речення про борг, на який цього місяця йде найбільше понад його обов'язковий платіж.
 
     Якщо в цього боргу найвища ставка серед активних боргів, речення пояснює
@@ -461,14 +456,15 @@ def _base_sentence(plan: MilpPlan) -> str:
 
 
 async def _extra_question_sentences(
-    session: AsyncSession, user_id: str, plan: MilpPlan, debts: list[Debt], min_total: float,
+    session: AsyncSession, user_id: str, plan: MilpPlan, debts: list[DebtState], min_total: float,
     amount: float, mode: str,
 ) -> list[str]:
     """Речення сценарію зміни додаткового платежу з базою і різницею.
 
     mode "add": новий додатковий платіж = поточний + amount; mode "total":
     новий додатковий платіж = amount. Бюджет = обов'язкові платежі + новий
-    додатковий платіж; строк і переплату рахує MILP-солвер. Доступність
+    додатковий платіж; строк і переплату рахує MILP-солвер в окремому потоці;
+    без розв'язку "Optimal" сценарій позначається як нерозрахований. Доступність
     рахується для нового додаткового платежу.
     """
     current = plan.extra_monthly_uah
@@ -480,9 +476,11 @@ async def _extra_question_sentences(
         line = f"Якби додатковий платіж був {format_uah(amount)} грн замість {format_uah(current)} грн, "
 
     try:
-        result = optimize_milp(_debt_dicts(debts), min_total + new_extra, WHAT_IF_HORIZON_MONTHS)
+        result = await solve_in_thread(
+            optimize_milp, _debt_dicts(debts), min_total + new_extra, WHAT_IF_HORIZON_MONTHS
+        )
     except Exception:
-        logger.exception("сценарій додаткового платежу: MILP-солвер впав")
+        logger.exception("сценарій додаткового платежу: MILP-солвер впав або не вклався в ліміт часу")
         result = None
     base_paid = plan.plan_data.get("milp", {}).get("months_to_payoff") is not None
     if not result or result["status"] != "Optimal":
@@ -572,9 +570,7 @@ async def _build_context(session: AsyncSession, user_id: str, question: str | No
         .order_by(MilpPlan.generated_at.desc())
         .limit(1)
     )).scalar_one_or_none()
-    debts = (await session.execute(
-        select(Debt).where(Debt.user_id == user_id, Debt.is_active == True)
-    )).scalars().all()
+    debts = await active_debt_states(session, user_id)
 
     savings = await _savings_total(session, user_id)
     savings_sentence = f"Заощадження: {format_uah(savings)} грн." if savings > 0 else None

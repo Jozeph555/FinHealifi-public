@@ -23,18 +23,19 @@ export default function Layout({ children }) {
   return (
     <div className="min-h-screen bg-paper">
       <header className="border-b border-ink/10 bg-white">
-        <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3">
+        {/* На вузькому екрані навігація — окремим рядком під назвою, з власною прокруткою. */}
+        <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3">
           <span className="font-display text-lg font-semibold text-forest">
             FinHealifi
           </span>
 
-          <nav className="flex items-center gap-1">
+          <nav className="-mx-1 flex w-full items-center gap-1 overflow-x-auto px-1 sm:mx-0 sm:w-auto sm:px-0">
             {NAV_ITEMS.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
                 className={({ isActive }) =>
-                  `rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                  `shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition ${
                     isActive
                       ? "bg-forest/10 text-forest"
                       : "text-ink/60 hover:bg-ink/5 hover:text-ink"
@@ -46,7 +47,7 @@ export default function Layout({ children }) {
             ))}
             <button
               onClick={handleLogout}
-              className="ml-2 rounded-md px-3 py-1.5 text-sm font-medium text-ink/50 transition hover:bg-brick/10 hover:text-brick"
+              className="ml-2 shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium text-ink/50 transition hover:bg-brick/10 hover:text-brick"
             >
               Вийти
             </button>

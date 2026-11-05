@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import api from "../services/api";
+import { clampInteger, normalizeIntegerInput } from "../utils/numberInput";
+
+// Глибина історії, місяців: ті самі межі, що в API (SyncStartRequest.months).
+const MONTHS_MIN = 1;
+const MONTHS_MAX = 24;
+const MONTHS_DEFAULT = 1;
 
 export default function MonobankConnect({ onDone }) {
   const [step, setStep] = useState("token"); // token | accounts | syncing | done
@@ -9,7 +15,8 @@ export default function MonobankConnect({ onDone }) {
 
   const [accounts, setAccounts] = useState([]);
   const [selectedAccounts, setSelectedAccounts] = useState([]);
-  const [months, setMonths] = useState(1);
+  // Рядок, щоб поле можна було очистити під час набору; число — clampInteger.
+  const [months, setMonths] = useState(String(MONTHS_DEFAULT));
 
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState(null);
@@ -37,7 +44,7 @@ export default function MonobankConnect({ onDone }) {
     try {
       const res = await api.post("/mono/sync/start", {
         account_ids: selectedAccounts,
-        months,
+        months: clampInteger(months, MONTHS_MIN, MONTHS_MAX, MONTHS_DEFAULT),
       });
       setJobId(res.data.job_id);
       setStep("syncing");
@@ -126,19 +133,20 @@ export default function MonobankConnect({ onDone }) {
             ))}
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-ink">
+            <label className="mb-1 block text-sm font-medium text-ink" htmlFor="sync-months">
               Період історії (місяців)
             </label>
             <input
-              type="number"
-              min={1}
-              max={24}
+              id="sync-months"
+              type="text"
+              inputMode="numeric"
               value={months}
-              onChange={(e) => setMonths(Number(e.target.value))}
+              onChange={(e) => setMonths(normalizeIntegerInput(e.target.value))}
+              onBlur={() => setMonths(String(clampInteger(months, MONTHS_MIN, MONTHS_MAX, MONTHS_DEFAULT)))}
               className="w-24 rounded-lg border border-ink/15 bg-white px-3 py-2 outline-none focus:border-forest focus:ring-1 focus:ring-forest"
             />
             <p className="mt-1 text-xs text-ink/50">
-              Довша історія = точніший прогноз, але довша синхронізація (rate limit Monobank)
+              Довша історія дає більше місяців для оцінки спроможності, але синхронізація триває довше (ліміт запитів Monobank)
             </p>
           </div>
           {error && <p className="rounded-lg bg-brick/10 px-3 py-2 text-sm text-brick">{error}</p>}
@@ -155,7 +163,7 @@ export default function MonobankConnect({ onDone }) {
       {step === "syncing" && status && (
         <div className="space-y-3">
           <p className="text-sm text-ink/70">
-            Синхронізуємо... (rate limit Monobank — приблизно 1 хвилина на місяць історії)
+            Синхронізуємо... (ліміт запитів Monobank — приблизно 1 хвилина на місяць історії)
           </p>
           <div className="h-2 w-full overflow-hidden rounded-full bg-ink/10">
             <div

@@ -4,7 +4,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,10 +33,14 @@ class ConnectRequest(BaseModel):
     token: str
 
 
+SYNC_MONTHS_MIN = 1
+SYNC_MONTHS_MAX = 24
+
+
 class SyncStartRequest(BaseModel):
-    """Тіло запиту синхронізації: рахунки й глибина історії в місяцях."""
+    """Тіло запиту синхронізації: рахунки й глибина історії в місяцях (від 1 до 24)."""
     account_ids: list[str]
-    months: int = 1
+    months: int = Field(1, ge=SYNC_MONTHS_MIN, le=SYNC_MONTHS_MAX)
 
 
 @router.post("/connect")
@@ -119,14 +123,14 @@ async def start_sync(
     if len(accounts) != len(request.account_ids):
         raise HTTPException(
             status_code=404,
-            detail="Один або кілька account_ids не знайдено серед твоїх рахунків",
+            detail="Не вдалося знайти вибрані рахунки серед твоїх. Онови список рахунків і спробуй ще раз.",
         )
 
     encrypted_token = accounts[0].mono_token_encrypted
     if not encrypted_token:
         raise HTTPException(
             status_code=400,
-            detail="Обраний рахунок не має збереженого токена — виклич /mono/connect спочатку",
+            detail="Для вибраного рахунку немає збереженого токена Monobank. Підключи токен ще раз.",
         )
 
     # Один SyncJob використовує один токен.
@@ -163,9 +167,9 @@ async def sync_status(
     result = await db.execute(select(SyncJob).where(SyncJob.id == job_id))
     job = result.scalar_one_or_none()
     if job is None:
-        raise HTTPException(status_code=404, detail="Job не знайдено")
+        raise HTTPException(status_code=404, detail="Синхронізацію не знайдено.")
     if job.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Цей job належить іншому користувачу")
+        raise HTTPException(status_code=403, detail="Ця синхронізація належить іншому користувачу.")
 
     return {
         "job_id": job.id,

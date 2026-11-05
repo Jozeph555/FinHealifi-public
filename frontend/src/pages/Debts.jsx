@@ -1,23 +1,34 @@
 import { useState, useEffect, useRef } from "react";
 import api from "../services/api";
-import { formatMonth, formatUah, parseExtraInput, responseDetail } from "../utils/affordability";
+import PlanFact from "../components/PlanFact";
+import AmountRow, { RowAction } from "../components/ui/AmountRow";
+import { formatMonth, parseExtraInput, responseDetail } from "../utils/affordability";
+import { formatUah } from "../utils/money";
+import {
+  MATCHES_AVALANCHE_NOTE,
+  MATERIALIZE_BUTTON_LABEL,
+  NO_SCHEDULE_TOTALS_NOTE,
+  STRATEGY_LABELS,
+  acceptErrorText,
+  acceptedPlanView,
+  compareStrategies,
+  currentMonthPayments,
+  draftDetailsCaption,
+  draftView,
+  isPaidOff,
+  materializeAction,
+  materializeErrorText,
+  materializeTooEarlyText,
+  milpMatchesAvalanche,
+  notPaidOffLabel,
+  todayKyiv,
+  versionTotals,
+} from "../utils/debtPlan";
 
 // Калькулятор спроможності: додатковий платіж задає користувач; панель
 // показує лише історію, без прогнозу і без рекомендованої суми.
 const AFFORDABILITY_DEBOUNCE_MS = 500;
 const AFFORDABILITY_MONTHS = 12;
-
-function formatMoney(value) {
-  if (value === null || value === undefined) return "—";
-  return new Intl.NumberFormat("uk-UA", { maximumFractionDigits: 0 }).format(value) + " грн";
-}
-
-const STRATEGY_LABELS = {
-  milp: "MILP (оптимальна)",
-  avalanche: "Лавина",
-  snowball: "Сніжок",
-  minimum: "Тільки мінімуми",
-};
 
 // Категорії боргу для користувача; кожна відповідає одному з двох типів, які
 // розрізняють оптимізатори (debt_type: revolving | installment). МФО
@@ -146,11 +157,25 @@ export default function Debts() {
   const buildInFlight = useRef(false);
   const [planBuildError, setPlanBuildError] = useState(null);
 
+  // Прийнята версія плану (GET /debt/plan/active); null — прийнятого плану немає.
+  const [active, setActive] = useState(null);
+  const [isAccepting, setIsAccepting] = useState(false);
+  const acceptInFlight = useRef(false);
+  const [acceptError, setAcceptError] = useState(null);
+  const [isMaterializing, setIsMaterializing] = useState(false);
+  const materializeInFlight = useRef(false);
+  const [materializeError, setMaterializeError] = useState(null);
+  // Автоматична фіксація — один раз за відкриття сторінки.
+  const autoMaterializeTried = useRef(false);
+
+  const today = todayKyiv();
+
   async function loadAll() {
     setIsLoading(true);
-    const [debtsRes, planRes] = await Promise.allSettled([
+    const [debtsRes, planRes, activeRes] = await Promise.allSettled([
       api.get("/debt"),
       api.get("/debt/plan/latest"),
+      api.get("/debt/plan/active"),
     ]);
 
     if (debtsRes.status === "fulfilled") setDebts(debtsRes.value.data);
@@ -163,12 +188,73 @@ export default function Debts() {
       setPlanError(true);
     }
 
+    const activeVersion = activeRes.status === "fulfilled" ? activeRes.value.data : null;
+    setActive(activeVersion);
     setIsLoading(false);
+
+    if (!autoMaterializeTried.current && materializeAction(activeVersion, todayKyiv()) === "auto") {
+      autoMaterializeTried.current = true;
+      await handleMaterialize(false);
+    }
   }
 
   useEffect(() => {
     loadAll();
   }, []);
+
+  // Прийняти поточну чернетку; прийнятий план до цього лишається чинним.
+  async function handleAccept() {
+    if (acceptInFlight.current || !plan?.plan_id) return;
+    acceptInFlight.current = true;
+    setIsAccepting(true);
+    setAcceptError(null);
+    try {
+      await api.post(`/debt/plans/${plan.plan_id}/accept`);
+      setMaterializeError(null);
+      await reloadActive();
+    } catch (err) {
+      setAcceptError(acceptErrorText(err.response?.status, responseDetail(err)));
+    } finally {
+      acceptInFlight.current = false;
+      setIsAccepting(false);
+    }
+  }
+
+  // Відповіді accept і materialize — сама версія, без effective/pending; тож після них
+  // прийнятий план перечитується з GET /debt/plan/active.
+  async function reloadActive() {
+    try {
+      const res = await api.get("/debt/plan/active");
+      setActive(res.data);
+    } catch {
+      setActive(null);
+    }
+  }
+
+  // Після платежу, звірки чи позначки місяця: залишки боргів і актуальність чернетки
+  // змінюються, тож список боргів і чернетка перечитуються без перезавантаження сторінки.
+  async function refreshAfterLedgerChange() {
+    const [debtsRes, planRes] = await Promise.allSettled([api.get("/debt"), api.get("/debt/plan/latest")]);
+    if (debtsRes.status === "fulfilled") setDebts(debtsRes.value.data);
+    if (planRes.status === "fulfilled") setPlan({ ...planRes.value.data, source: "saved" });
+  }
+
+  // Зафіксувати розклад прийнятої версії (POST /debt/plan/materialize).
+  async function handleMaterialize(force) {
+    if (materializeInFlight.current) return;
+    materializeInFlight.current = true;
+    setIsMaterializing(true);
+    setMaterializeError(null);
+    try {
+      await api.post("/debt/plan/materialize", null, { params: force ? { force: true } : {} });
+      await reloadActive();
+    } catch (err) {
+      setMaterializeError(materializeErrorText(err.response?.status, responseDetail(err)));
+    } finally {
+      materializeInFlight.current = false;
+      setIsMaterializing(false);
+    }
+  }
 
   // Історична спроможність: лише при валідній сумі, з debounce; попередній
   // запит скасовується, тож у мережу йде тільки останнє значення.
@@ -291,13 +377,14 @@ export default function Debts() {
       const res = await api.post("/debt/optimize", { extra_monthly_uah: extra.value });
       setPlan({ ...res.data, source: "fresh" });
       setPlanError(false);
+      setAcceptError(null);
       setShowFullSchedule(false);
     } catch (err) {
       const status = err.response?.status;
       const detail = responseDetail(err);
       if (status === 409) {
         setPlanBuildError({ kind: "no_debts", text: detail || "Немає активних боргів." });
-      } else if (status === 422) {
+      } else if (status === 422 || status === 503) {
         setPlanBuildError({ kind: "detail", text: detail || "План не вдалося побудувати." });
       } else {
         setPlanBuildError({
@@ -320,6 +407,14 @@ export default function Debts() {
 
   const selectedCategoryObj = DEBT_CATEGORIES.find((c) => c.id === form.category);
   const resolvedDebtType = selectedCategoryObj.debt_type || form.debt_type;
+  const acceptedView = acceptedPlanView(active, today);
+  const acceptedPayments = acceptedView ? currentMonthPayments(acceptedView.shown, today) : null;
+  const draftBlock = draftView(planError ? null : plan, active);
+  const materializeState = materializeAction(active, today);
+  // Числа чернетки ховаються, якщо змінився склад боргів; «Скільки платити цього місяця»
+  // з чернетки — лише коли прийнятий план не показує свого розкладу за поточний місяць.
+  const showDraftNumbers = !draftBlock || draftBlock.showNumbers;
+  const showDraftThisMonth = showDraftNumbers && (draftBlock || !acceptedPayments);
 
   return (
     <div className="space-y-6">
@@ -366,34 +461,31 @@ export default function Debts() {
                   </div>
                 </form>
               ) : (
-                <div
+                <AmountRow
                   key={d.id}
-                  className="flex items-center justify-between rounded-lg border border-ink/10 p-3"
-                >
-                  <div>
-                    <p className="font-medium text-ink">{d.name}</p>
-                    <p className="text-xs text-ink/50">
+                  title={d.name}
+                  meta={
+                    <>
                       {d.debt_type === "revolving" ? "Кредитна лінія" : "Розстрочка/кредит"} •{" "}
                       {(d.monthly_rate * 100).toFixed(1)}% на місяць
-                      {d.min_payment ? ` • мін. платіж ${formatMoney(d.min_payment)}` : ""}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono text-lg text-brick">{formatMoney(d.balance)}</span>
-                    <button
-                      onClick={() => startEdit(d)}
-                      className="text-xs text-ink/40 hover:text-forest"
-                    >
-                      Редагувати
-                    </button>
-                    <button
-                      onClick={() => handleDeactivate(d.id)}
-                      className="text-xs text-ink/40 hover:text-brick"
-                    >
-                      Погашено
-                    </button>
-                  </div>
-                </div>
+                      {d.min_payment ? (
+                        <>
+                          {" "}• мін. платіж <span className="whitespace-nowrap">{formatUah(d.min_payment)}</span>
+                        </>
+                      ) : null}
+                    </>
+                  }
+                  amount={formatUah(d.balance)}
+                  amountClassName="text-lg text-brick"
+                  actions={
+                    <>
+                      <RowAction onClick={() => startEdit(d)}>Редагувати</RowAction>
+                      <RowAction onClick={() => handleDeactivate(d.id)} danger>
+                        Погашено
+                      </RowAction>
+                    </>
+                  }
+                />
               )
             )}
           </div>
@@ -409,7 +501,7 @@ export default function Debts() {
           Додатковий платіж на місяць, грн
         </label>
         <p className="mb-1 text-xs text-ink/50">
-          Понад мінімальні платежі за всіма боргами. 0 — лише мінімальні платежі.
+          Понад обов'язкові платежі за всіма боргами. 0 — лише обов'язкові платежі.
         </p>
         <div className="flex flex-wrap items-start gap-2">
           <input
@@ -426,7 +518,7 @@ export default function Debts() {
             disabled={isBuildingPlan || extra.value === null}
             className="rounded-lg bg-forest px-4 py-2 text-sm font-medium text-paper transition hover:bg-forest-light disabled:opacity-50"
           >
-            {isBuildingPlan ? "Будуємо план..." : "Побудувати план"}
+            {isBuildingPlan ? "Будуємо план..." : active ? "Побудувати новий план" : "Побудувати план"}
           </button>
         </div>
         {extra.error && <p className="mt-1 text-xs text-brick">{extra.error}</p>}
@@ -585,176 +677,290 @@ export default function Debts() {
           План погашення
         </h2>
 
-        {planError ? (
+        {!active && planError ? (
           <p className="text-sm text-ink/60">
             Плану ще немає. Вкажи додатковий платіж і натисни «Побудувати план».
           </p>
         ) : (
           <div className="space-y-4">
-            {plan.source === "fresh" ? (
-              <div className="space-y-1 border-b border-ink/10 pb-4 text-sm">
-                <p className="text-xs text-ink/50">Щойно побудований план</p>
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <p className="text-xs text-ink/50">Мінімальні платежі</p>
-                    <p className="font-mono">{formatUah(plan.min_payments_total_uah)}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-ink/50">Додатковий платіж</p>
-                    <p className="font-mono">{formatUah(plan.extra_monthly_uah)}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-ink/50">Разом на місяць</p>
-                    <p className="font-mono font-semibold text-forest">
-                      {formatUah(plan.total_monthly_payment_uah)}
-                    </p>
-                  </div>
-                </div>
-                <p className="text-xs text-ink/50">Статус розв'язку: {plan.status}</p>
-              </div>
-            ) : (
-              <div className="space-y-1 border-b border-ink/10 pb-4 text-xs text-ink/50">
-                <p>Останній збережений план{plan.generated_at ? ` (${plan.generated_at.slice(0, 10)})` : ""}.</p>
-                <p>
-                  Статус запису: {plan.status}.{" "}
-                  {plan.extra_monthly_uah !== null && plan.extra_monthly_uah !== undefined
-                    ? `Додатковий платіж: ${formatUah(plan.extra_monthly_uah)}.`
-                    : "Додатковий платіж для цього плану не збережено."}
-                </p>
-                {plan.is_stale === true && (
-                  <p className="rounded-lg bg-brick/10 px-3 py-2 text-sm font-medium text-brick">
-                    ⚠ Склад боргів змінився після побудови цього плану. Перебудуйте план.
+            {acceptedView && (
+              <div className="space-y-2 border-b border-ink/10 pb-4 text-sm">
+                <p className="text-xs font-medium uppercase tracking-wide text-forest">Прийнятий план</p>
+                {acceptedView.messages
+                  .filter((m) => m.key !== "structure_changed")
+                  .map((m) => (
+                    <p key={m.key} className="text-ink/80">{m.text}</p>
+                  ))}
+                <MonthlyTotals totals={versionTotals(acceptedView.shown)} />
+                {!acceptedView.shown.materialized && (
+                  <p className="text-xs text-ink/50">{NO_SCHEDULE_TOTALS_NOTE}</p>
+                )}
+                {acceptedView.shown.materialized && acceptedView.shown.months_to_payoff ? (
+                  <p className="text-xs text-ink/60">
+                    Місяців до погашення: <span className="font-mono">{acceptedView.shown.months_to_payoff}</span> •
+                    Переплата за планом:{" "}
+                    <span className="whitespace-nowrap font-mono">{formatUah(acceptedView.shown.total_interest)}</span>
                   </p>
-                )}
-                {(plan.is_stale === null || plan.is_stale === undefined) && <p>Актуальність невідома.</p>}
-              </div>
-            )}
-            <div className="flex items-baseline justify-between border-b border-ink/10 pb-4">
-              <div>
-                <p className="text-xs text-ink/50">Місяців до погашення</p>
-                {plan.months_to_payoff ? (
-                  <p className="font-mono text-2xl font-semibold text-forest">{plan.months_to_payoff}</p>
-                ) : (
-                  <p className="text-sm font-medium text-brick">{notPaidOffLabel(plan.horizon_months)}</p>
-                )}
-              </div>
-              <div className="text-right">
-                <p className="text-xs text-ink/50">Переплата (MILP)</p>
-                <p className="font-mono text-lg text-ink">{formatMoney(plan.total_interest_paid)}</p>
-              </div>
-            </div>
-
-            {plan.monthly_schedule?.length > 0 && (
-              <div className="space-y-2 border-b border-ink/10 pb-4">
-                <p className="text-xs text-ink/50">Скільки платити цього місяця (за MILP-планом)</p>
-                {Object.entries(plan.monthly_schedule[0].payments)
-                  .filter(([, amount]) => amount > 0)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([debtName, paymentAmount]) => {
-                    const remainingBalance = plan.monthly_schedule[0].balances[debtName];
-                    return (
-                      <div
-                        key={debtName}
-                        className="flex items-center justify-between rounded-lg bg-forest/5 px-3 py-2"
-                      >
-                        <span className="text-sm text-ink">{debtName}</span>
-                        <div className="text-right">
-                          <span className="font-mono text-sm font-semibold text-forest">
-                            {formatMoney(paymentAmount)}
-                          </span>
-                          <span className="ml-2 text-xs text-ink/40">
-                            залишиться {formatMoney(remainingBalance)}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
-
-            {plan.monthly_schedule?.length > 1 && (
-              <div className="space-y-2 border-b border-ink/10 pb-4">
-                <button
-                  onClick={() => setShowFullSchedule((v) => !v)}
-                  className="text-xs font-medium text-forest underline decoration-forest/30 underline-offset-2 hover:decoration-forest"
-                >
-                  {showFullSchedule
-                    ? "Сховати повний графік"
-                    : `Показати повний графік (${plan.monthly_schedule.length} міс.)`}
-                </button>
-
-                {showFullSchedule && (
+                ) : null}
+                {acceptedPayments?.length > 0 && (
                   <div className="space-y-2 pt-1">
-                    {plan.monthly_schedule.slice(1).map((monthEntry) => (
-                      <details
-                        key={monthEntry.month}
-                        className="rounded-lg border border-ink/10 p-3"
-                      >
-                        <summary className="cursor-pointer text-sm text-ink">
-                          Місяць {monthEntry.month} — залишок{" "}
-                          {formatMoney(monthEntry.total_balance)}
-                        </summary>
-                        <div className="mt-2 space-y-1">
-                          {Object.entries(monthEntry.payments)
-                            .filter(([, amount]) => amount > 0)
-                            .sort((a, b) => b[1] - a[1])
-                            .map(([debtName, paymentAmount]) => (
-                              <div
-                                key={debtName}
-                                className="flex items-center justify-between text-xs"
-                              >
-                                <span className="text-ink/70">{debtName}</span>
-                                <div className="text-right">
-                                  <span className="font-mono text-ink">
-                                    {formatMoney(paymentAmount)}
-                                  </span>
-                                  <span className="ml-2 text-ink/40">
-                                    залишиться {formatMoney(monthEntry.balances[debtName])}
-                                  </span>
-                                </div>
-                              </div>
-                            ))}
-                        </div>
-                      </details>
+                    <p className="text-xs text-ink/50">Скільки платити цього місяця</p>
+                    {acceptedPayments.map((d) => (
+                      <PaymentRow key={d.debt_id} name={d.name} payment={d.payment} remaining={d.closing} />
                     ))}
                   </div>
                 )}
+                {acceptedView.messages
+                  .filter((m) => m.key === "structure_changed")
+                  .map((m) => (
+                    <p key={m.key} className="rounded-lg bg-gold/15 px-3 py-2 text-ink/80">{m.text}</p>
+                  ))}
+                {isMaterializing && <p className="text-xs text-ink/50">Фіксуємо план...</p>}
+                {!isMaterializing && materializeState === "too_early" && (
+                  <div className="space-y-2 rounded-lg bg-ink/5 px-3 py-2">
+                    <p className="text-ink/80">{materializeTooEarlyText(active)}</p>
+                    <button
+                      onClick={() => handleMaterialize(true)}
+                      className="rounded-lg border border-forest/40 px-3 py-1.5 text-xs font-medium text-forest transition hover:bg-forest/5"
+                    >
+                      {MATERIALIZE_BUTTON_LABEL}
+                    </button>
+                  </div>
+                )}
+                {materializeError && (
+                  <p className="rounded-lg bg-ink/5 px-3 py-2 text-ink/80">{materializeError}</p>
+                )}
               </div>
             )}
 
-            <div className="space-y-2">
-              <p className="text-xs text-ink/50">Порівняння всіх стратегій</p>
-              {Object.entries(plan.comparison || {})
-                .sort((a, b) => (a[1].total_interest_paid ?? Infinity) - (b[1].total_interest_paid ?? Infinity))
-                .map(([strategy, data]) => (
-                  <div
-                    key={strategy}
-                    className={`flex items-center justify-between rounded-lg px-3 py-2 ${
-                      strategy === "milp" ? "bg-gold/10" : "bg-ink/5"
-                    }`}
+            {draftBlock && (
+              <div className="space-y-2 border-b border-ink/10 pb-4 text-sm">
+                <p className="text-xs font-medium uppercase tracking-wide text-ink/50">Чернетка</p>
+                {draftBlock.notes.map((note, i) => (
+                  <p
+                    key={note}
+                    className={
+                      draftBlock.status !== "ok" && i === 0
+                        ? "rounded-lg bg-gold/15 px-3 py-2 text-ink/80"
+                        : i === 0
+                          ? "text-ink/80"
+                          : "text-xs text-ink/50"
+                    }
                   >
-                    <span className={strategy === "milp" ? "font-medium text-forest" : "text-ink/70"}>
-                      {STRATEGY_LABELS[strategy] || strategy}
-                    </span>
-                    <div className="text-right">
-                      <span className="font-mono text-sm">{formatMoney(data.total_interest_paid)}</span>
-                      <span className="ml-2 text-xs text-ink/40">
-                        {data.months_to_payoff ? `${data.months_to_payoff} міс` : notPaidOffLabel(plan.horizon_months)}
-                      </span>
-                    </div>
-                  </div>
+                    {note}
+                  </p>
                 ))}
-            </div>
+                <MonthlyTotals totals={draftBlock.totals} />
+                {draftBlock.canAccept && (
+                  <button
+                    onClick={handleAccept}
+                    disabled={isAccepting}
+                    className="rounded-lg bg-forest px-4 py-2 text-sm font-medium text-paper transition hover:bg-forest-light disabled:opacity-50"
+                  >
+                    {isAccepting ? "Приймаємо..." : "Прийняти план"}
+                  </button>
+                )}
+                {acceptError && (
+                  <p className="rounded-lg bg-brick/10 px-3 py-2 text-brick">{acceptError}</p>
+                )}
+              </div>
+            )}
+
+            {!planError && (
+              <>
+                <p className="text-xs font-medium uppercase tracking-wide text-ink/50">
+                  {draftDetailsCaption(plan, active)}
+                </p>
+                {plan.plan_note && (
+                  <p className="rounded-lg bg-gold/15 px-3 py-2 text-sm text-ink/80">{plan.plan_note}</p>
+                )}
+                <div className="flex items-baseline justify-between border-b border-ink/10 pb-4">
+                  <div>
+                    <p className="text-xs text-ink/50">
+                      Місяців до погашення
+                      {draftBlock?.numbersCaption ? ` (${draftBlock.numbersCaption})` : ""}
+                    </p>
+                    {!showDraftNumbers ? (
+                      <p className="font-mono text-2xl text-ink/40">—</p>
+                    ) : plan.months_to_payoff ? (
+                      <p className="font-mono text-2xl font-semibold text-forest">{plan.months_to_payoff}</p>
+                    ) : (
+                      <p className="text-sm font-medium text-brick">{notPaidOffLabel(plan.horizon_months)}</p>
+                    )}
+                  </div>
+                  {!showDraftNumbers ? (
+                    <div className="text-right">
+                      <p className="text-xs text-ink/50">Переплата за планом</p>
+                      <p className="font-mono text-lg text-ink/40">—</p>
+                    </div>
+                  ) : plan.months_to_payoff ? (
+                    <div className="text-right">
+                      <p className="text-xs text-ink/50">
+                        Переплата за планом
+                        {draftBlock?.numbersCaption ? ` (${draftBlock.numbersCaption})` : ""}
+                      </p>
+                      <p className="font-mono text-lg text-ink">{formatUah(plan.total_interest_paid)}</p>
+                    </div>
+                  ) : null}
+                </div>
+
+                {showDraftThisMonth && plan.monthly_schedule?.length > 0 && (
+                  <div className="space-y-2 border-b border-ink/10 pb-4">
+                    <p className="text-xs text-ink/50">Скільки платити цього місяця</p>
+                    {Object.entries(plan.monthly_schedule[0].payments)
+                      .filter(([, amount]) => amount > 0)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([debtName, paymentAmount]) => (
+                        <PaymentRow
+                          key={debtName}
+                          name={debtName}
+                          payment={paymentAmount}
+                          remaining={plan.monthly_schedule[0].balances[debtName]}
+                        />
+                      ))}
+                  </div>
+                )}
+
+                {showDraftNumbers && plan.monthly_schedule?.length > 1 && (
+                  <div className="space-y-2 border-b border-ink/10 pb-4">
+                    <button
+                      onClick={() => setShowFullSchedule((v) => !v)}
+                      className="text-xs font-medium text-forest underline decoration-forest/30 underline-offset-2 hover:decoration-forest"
+                    >
+                      {showFullSchedule
+                        ? "Сховати повний графік"
+                        : `Показати повний графік (${plan.monthly_schedule.length} міс.)`}
+                    </button>
+
+                    {showFullSchedule && (
+                      <div className="space-y-2 pt-1">
+                        {plan.monthly_schedule.slice(1).map((monthEntry) => (
+                          <details
+                            key={monthEntry.month}
+                            className="rounded-lg border border-ink/10 p-3"
+                          >
+                            <summary className="cursor-pointer text-sm text-ink">
+                              Місяць {monthEntry.month} — залишок{" "}
+                              <span className="whitespace-nowrap">{formatUah(monthEntry.total_balance)}</span>
+                            </summary>
+                            <div className="mt-2 space-y-1">
+                              {Object.entries(monthEntry.payments)
+                                .filter(([, amount]) => amount > 0)
+                                .sort((a, b) => b[1] - a[1])
+                                .map(([debtName, paymentAmount]) => (
+                                  <div
+                                    key={debtName}
+                                    className="flex items-center justify-between gap-3 text-xs"
+                                  >
+                                    <span className="min-w-0 text-ink/70 [overflow-wrap:anywhere]">{debtName}</span>
+                                    <div className="shrink-0 text-right">
+                                      <span className="whitespace-nowrap font-mono text-ink">
+                                        {formatUah(paymentAmount)}
+                                      </span>
+                                      <span className="block whitespace-nowrap text-ink/40 sm:ml-2 sm:inline">
+                                        залишиться {formatUah(monthEntry.balances[debtName])}
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))}
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {showDraftNumbers && (
+                <div className="space-y-2">
+                  <p className="text-xs text-ink/50">
+                    Порівняння всіх стратегій
+                    {draftBlock?.numbersCaption ? ` (${draftBlock.numbersCaption})` : ""}
+                  </p>
+                  {Object.entries(plan.comparison || {})
+                    .sort(compareStrategies)
+                    .map(([strategy, data]) => (
+                      <div
+                        key={strategy}
+                        className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 ${
+                          strategy === "milp" ? "bg-gold/10" : "bg-ink/5"
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <span className={strategy === "milp" ? "font-medium text-forest" : "text-ink/70"}>
+                            {STRATEGY_LABELS[strategy] || strategy}
+                          </span>
+                          {strategy === "milp" && milpMatchesAvalanche(plan.comparison) && (
+                            <p className="text-xs text-ink/50">{MATCHES_AVALANCHE_NOTE}</p>
+                          )}
+                        </div>
+                        {isPaidOff(data) ? (
+                          <div className="shrink-0 text-right">
+                            <p className="text-xs text-ink/50">Переплата</p>
+                            <p className="whitespace-nowrap">
+                              <span className="font-mono text-sm">{formatUah(data.total_interest_paid)}</span>
+                              <span className="ml-2 text-xs text-ink/40">{data.months_to_payoff} міс.</span>
+                            </p>
+                          </div>
+                        ) : (
+                          <span className="shrink-0 text-right text-xs text-brick">
+                            {notPaidOffLabel(plan.horizon_months)}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </section>
+
+      {/* key: після прийняття чи фіксації версії блок завантажується заново. */}
+      {active && (
+        <PlanFact
+          key={`${active.version_id}:${active.effective?.version_id}:${active.materialized}`}
+          debts={debts}
+          today={today}
+          onLedgerChange={refreshAfterLedgerChange}
+        />
+      )}
     </div>
   );
 }
 
-// Підпис для плану, що не погашає борги за горизонт планування.
-function notPaidOffLabel(horizonMonths) {
-  return horizonMonths ? `не погашається за ${horizonMonths} міс` : "не погашається";
+// Рядок «Скільки платити цього місяця»: борг, плановий платіж і залишок після нього.
+function PaymentRow({ name, payment, remaining }) {
+  return (
+    <AmountRow
+      title={<span className="text-sm font-normal">{name}</span>}
+      meta={<span className="whitespace-nowrap">залишиться {formatUah(remaining)}</span>}
+      amount={formatUah(payment)}
+      amountClassName="text-sm font-semibold text-forest"
+      className="rounded-lg bg-forest/5 px-3 py-2"
+    />
+  );
+}
+
+// «Обов'язкові платежі / Додатковий платіж / Разом на місяць» — однаково для чернетки й прийнятого плану.
+function MonthlyTotals({ totals }) {
+  return (
+    <div className="grid grid-cols-3 gap-3">
+      <div>
+        <p className="text-xs text-ink/50">Обов'язкові платежі</p>
+        <p className="font-mono">{formatUah(totals.min)}</p>
+      </div>
+      <div>
+        <p className="text-xs text-ink/50">Додатковий платіж</p>
+        <p className="font-mono">{formatUah(totals.extra)}</p>
+      </div>
+      <div>
+        <p className="text-xs text-ink/50">Разом на місяць</p>
+        <p className="font-mono font-semibold text-forest">{formatUah(totals.total)}</p>
+      </div>
+    </div>
+  );
 }
 
 const INPUT_CLASS =
@@ -860,19 +1066,17 @@ function AffordabilityPanel({ data, extraValue }) {
           <p className="text-ink">
             У <span className="font-semibold">{data.count_ge_extra}</span> із{" "}
             <span className="font-semibold">{data.n_months_used}</span> місяців вільний грошовий
-            потік (після мінімальних платежів) був не менший за {formatUah(extraValue)}.
+            потік (після обов'язкових платежів) був не менший за {formatUah(extraValue)}.
           </p>
-          <dl className="grid grid-cols-5 gap-2 text-xs">
+          <dl className="grid grid-cols-3 gap-2 text-xs">
             {[
               ["Медіана", data.median],
-              ["P25", data.p25],
-              ["P75", data.p75],
               ["Мінімум", data.min],
               ["Максимум", data.max],
             ].map(([label, value]) => (
-              <div key={label}>
+              <div key={label} className="min-w-0">
                 <dt className="text-ink/50">{label}</dt>
-                <dd className="font-mono text-ink">{formatUah(value)}</dd>
+                <dd className="whitespace-nowrap font-mono text-ink">{formatUah(value)}</dd>
               </div>
             ))}
           </dl>
@@ -881,16 +1085,23 @@ function AffordabilityPanel({ data, extraValue }) {
               const below = m.fcf_uah < extraValue;
               return (
                 <li key={m.month} className="flex items-center gap-2 text-xs">
-                  <span className="w-16 font-mono text-ink/60">{formatMonth(m.month)}</span>
-                  <span className="h-2 flex-1 rounded bg-ink/5">
+                  <span className="w-14 shrink-0 font-mono text-ink/60">{formatMonth(m.month)}</span>
+                  <span className="h-2 min-w-0 flex-1 rounded bg-ink/5">
                     <span
                       className={`block h-2 rounded ${below ? "bg-brick/60" : "bg-sage/70"}`}
                       style={{ width: `${(Math.abs(m.fcf_uah) / maxAbs) * 100}%` }}
                     />
                   </span>
-                  <span className="w-28 text-right font-mono text-ink">{formatUah(m.fcf_uah)}</span>
-                  <span className={`w-28 ${below ? "text-brick" : "text-ink/50"}`}>
-                    {below ? "✗ менше за суму" : "✓ не менше"}
+                  <span className="shrink-0 whitespace-nowrap text-right font-mono text-ink sm:w-28">
+                    {formatUah(m.fcf_uah)}
+                  </span>
+                  {/* На вузькому екрані — лише позначка, повний підпис з sm. */}
+                  <span
+                    className={`shrink-0 whitespace-nowrap sm:w-28 ${below ? "text-brick" : "text-ink/50"}`}
+                    title={below ? "менше за суму" : "не менше"}
+                  >
+                    <span className="sm:hidden">{below ? "✗" : "✓"}</span>
+                    <span className="hidden sm:inline">{below ? "✗ менше за суму" : "✓ не менше"}</span>
                   </span>
                 </li>
               );

@@ -7,9 +7,34 @@
 
 MILP-модель — спрощена версія RPML (Rios-Solis та ін., 2017) без штрафів за
 недоплату, зі сталим бюджетом.
+
+optimize_debt_repayment_async розв'язує MILP поза event loop; якщо розв'язок не
+"Optimal" (ліміт часу, помилка, інший статус), на місце milp ставить результат
+avalanche з позначкою fallback=True — за умови, що avalanche вкладається в бюджет.
 """
-from app.services.milp_optimizer import optimize_milp
+import logging
+
+from app.services.milp_optimizer import STATUS_TIME_LIMIT, optimize_milp, solve_in_thread
 from app.services.debt_rules import debt_min_payment
+
+logger = logging.getLogger(__name__)
+
+HEURISTIC_STRATEGIES = ("avalanche", "snowball", "minimum")
+
+# Статуси milp, коли розв'язання не повернуло результату.
+STATUS_TIMEOUT = "Timeout"
+STATUS_ERROR = "Error"
+
+# Статуси milp, коли розв'язувач не встиг завершити розв'язання.
+SOLVER_NOT_FINISHED_STATUSES = frozenset({STATUS_TIME_LIMIT, "Not Solved", STATUS_TIMEOUT})
+
+# Допуск перевірки «платежі місяця не перевищують бюджет», грн.
+BUDGET_TOLERANCE_UAH = 0.01
+
+
+def _heuristic_strategies(debts: list[dict], monthly_budget: float, months: int) -> dict:
+    """Рахує avalanche, snowball і minimum."""
+    return {s: simulate_strategy(debts, monthly_budget, months, s) for s in HEURISTIC_STRATEGIES}
 
 
 def optimize_debt_repayment(debts: list[dict], monthly_budget: float, months: int = 24) -> dict:
@@ -23,13 +48,60 @@ def optimize_debt_repayment(debts: list[dict], monthly_budget: float, months: in
     Returns:
         Словник {назва стратегії: результат} для avalanche, snowball, minimum і milp.
     """
-    strategies = {}
-
-    for strategy in ["avalanche", "snowball", "minimum"]:
-        strategies[strategy] = simulate_strategy(debts, monthly_budget, months, strategy)
-
+    strategies = _heuristic_strategies(debts, monthly_budget, months)
     strategies["milp"] = optimize_milp(debts, monthly_budget, months)
+    return strategies
 
+
+def _within_budget(result: dict, monthly_budget: float) -> bool:
+    """Чи платежі кожного місяця результату не перевищують бюджет."""
+    return all(
+        sum(m["payments"].values()) <= monthly_budget + BUDGET_TOLERANCE_UAH
+        for m in result["monthly_log"]
+    )
+
+
+def _avalanche_as_milp(avalanche: dict, solver_status: str) -> dict:
+    """Повертає результат avalanche на місці milp зі статусом розв'язувача і fallback=True."""
+    return {**avalanche, "strategy": "milp", "status": solver_status, "fallback": True}
+
+
+async def optimize_debt_repayment_async(debts: list[dict], monthly_budget: float, months: int = 24) -> dict:
+    """Рахує чотири стратегії, розв'язуючи MILP в окремому потоці з лімітом часу.
+
+    Якщо MILP-розв'язок не "Optimal" і avalanche вкладається в бюджет щомісяця,
+    strategies["milp"] — результат avalanche з fallback=True і статусом
+    розв'язувача в status ("Timeout", "Error" або статус CBC). Інакше milp —
+    результат розв'язувача як є, без ключа fallback.
+
+    Args:
+        debts: Борги з ключами name, balance, monthly_rate, debt_type, min_payment.
+        monthly_budget: Загальна сума на платежі щомісяця, грн.
+        months: Горизонт планування в місяцях.
+
+    Returns:
+        Словник {назва стратегії: результат} для avalanche, snowball, minimum і milp.
+
+    Raises:
+        TimeoutError: розв'язання не завершилося вчасно, а avalanche не вкладається в бюджет.
+        Exception: помилка розв'язувача, коли avalanche не вкладається в бюджет.
+    """
+    strategies = _heuristic_strategies(debts, monthly_budget, months)
+    avalanche = strategies["avalanche"]
+    try:
+        milp = await solve_in_thread(optimize_milp, debts, monthly_budget, months)
+    except Exception as exc:
+        if not _within_budget(avalanche, monthly_budget):
+            raise
+        status = STATUS_TIMEOUT if isinstance(exc, TimeoutError) else STATUS_ERROR
+        logger.warning("MILP-розв'язувач без результату (%s), використано avalanche", status, exc_info=exc)
+        strategies["milp"] = _avalanche_as_milp(avalanche, status)
+        return strategies
+
+    if milp["status"] != "Optimal" and _within_budget(avalanche, monthly_budget):
+        logger.warning("MILP-розв'язувач повернув статус %s, використано avalanche", milp["status"])
+        milp = _avalanche_as_milp(avalanche, milp["status"])
+    strategies["milp"] = milp
     return strategies
 
 

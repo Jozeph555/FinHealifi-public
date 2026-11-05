@@ -118,10 +118,10 @@ async def confirm_statement_import(
     if cached is None:
         raise HTTPException(
             status_code=404,
-            detail="Import не знайдено або застарів. Завантаж файл повторно через /statement/preview",
+            detail="Попередній перегляд файлу не знайдено або він застарів. Завантаж файл ще раз.",
         )
     if cached["user_id"] != current_user.id:
-        raise HTTPException(status_code=403, detail="Цей import належить іншому користувачу")
+        raise HTTPException(status_code=403, detail="Цей імпорт належить іншому користувачу.")
 
     raw_df = read_statement_file(cached["file_bytes"], cached["filename"])
     header_row = find_header_row(raw_df)
@@ -159,7 +159,7 @@ async def confirm_statement_import(
     if not request.bank_id and not request.custom_bank_name:
         raise HTTPException(
             status_code=422,
-            detail="Потрібно обрати банк (bank_id) або вказати власний (custom_bank_name)",
+            detail="Вибери банк зі списку або вкажи назву свого банку.",
         )
     try:
         bank = await get_or_create_bank(

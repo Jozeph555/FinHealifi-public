@@ -5,8 +5,10 @@
   детермінований, не залежить від порядку і змінюється лише від полів, які
   використовує MILP.
 - POST /debt/optimize зберігає extra_monthly_uah і debts_fingerprint.
-- GET /debt/plan/latest повертає extra_monthly_uah (null для планів без нього)
-  і is_stale — true/false, якщо відбиток збережено, null — якщо ні.
+- GET /debt/plan/latest повертає extra_monthly_uah (null для планів без нього),
+  balances_changed і structure_changed — true/false, якщо відбиток збережено,
+  null — якщо ні; зміна залишку — balances_changed, нового боргу чи
+  деактивація — structure_changed.
 - 404 не згадує optimize-from-forecast.
 - План, що не погашає борги за горизонт: months_to_payoff = null і
   horizon_months у GET /debt/plan/latest; у контексті радника — речення, що
@@ -15,7 +17,6 @@
 HTTP — через httpx ASGITransport на мінімальному FastAPI з роутером боргів.
 """
 import uuid
-from datetime import date
 from types import SimpleNamespace
 
 import httpx
@@ -28,7 +29,6 @@ import app.api.debt as debt_module
 from app.services.advisor_context import build_advisor_context
 from app.services.llm_advisor import _format_context
 from app.api.deps import get_current_user, get_db
-from app.models.forecast import Forecast
 from app.models.milp_plan import MilpPlan
 
 
@@ -136,7 +136,7 @@ async def test_latest_fresh_plan_is_not_stale_and_has_extra(client):
     body = (await client.get("/debt/plan/latest")).json()
 
     assert body["extra_monthly_uah"] == 3_000
-    assert body["is_stale"] is False
+    assert body["balances_changed"] is False and body["structure_changed"] is False
 
 
 @pytest.mark.parametrize("change", ["patch_balance", "add_debt", "deactivate"])
@@ -152,7 +152,10 @@ async def test_latest_becomes_stale_after_debts_change(client, change):
         await client.patch(f"/debt/{debt['id']}", json={"is_active": False})
 
     body = (await client.get("/debt/plan/latest")).json()
-    assert body["is_stale"] is True
+    if change == "patch_balance":
+        assert body["balances_changed"] is True and body["structure_changed"] is False
+    else:
+        assert body["balances_changed"] is False and body["structure_changed"] is True
 
 
 async def test_latest_not_stale_after_inactive_debt_edit(client):
@@ -163,7 +166,8 @@ async def test_latest_not_stale_after_inactive_debt_edit(client):
 
     await client.patch(f"/debt/{old['id']}", json={"balance": 1, "name": "Перейменований погашений"})
 
-    assert (await client.get("/debt/plan/latest")).json()["is_stale"] is False
+    body = (await client.get("/debt/plan/latest")).json()
+    assert body["balances_changed"] is False and body["structure_changed"] is False
 
 
 async def test_latest_not_stale_after_rename(client):
@@ -172,35 +176,23 @@ async def test_latest_not_stale_after_rename(client):
 
     assert (await client.patch(f"/debt/{debt['id']}", json={"name": "Нова назва"})).status_code == 200
 
-    assert (await client.get("/debt/plan/latest")).json()["is_stale"] is False
+    body = (await client.get("/debt/plan/latest")).json()
+    assert body["balances_changed"] is False and body["structure_changed"] is False
 
 
 async def test_latest_old_plan_without_fingerprint_is_unknown(db_session, real_user, client):
     await _create_debt(client)
     db_session.add(MilpPlan(id=str(uuid.uuid4()), user_id=real_user.id, months_to_payoff=10,
-                            total_interest_paid=100.0, plan_data={}, status="active"))
+                            total_interest_paid=100.0, plan_data={}, status="draft"))
     await db_session.flush()
 
     body = (await client.get("/debt/plan/latest")).json()
 
     assert body["extra_monthly_uah"] is None
-    assert body["is_stale"] is None
+    assert body["balances_changed"] is None and body["structure_changed"] is None
     for key in ("plan_id", "forecast_id", "generated_at", "months_to_payoff", "total_interest_paid", "status",
                 "comparison", "monthly_schedule"):
         assert key in body
-
-
-async def test_latest_after_optimize_from_forecast_is_unknown_and_does_not_crash(db_session, real_user, client):
-    await _create_debt(client)
-    db_session.add(Forecast(id=str(uuid.uuid4()), user_id=real_user.id, period_start=date(2026, 11, 1),
-                            period_end=date(2026, 11, 30), predicted_income=60_000, predicted_expenses=55_000,
-                            free_cash_flow=5_000, method="average_fallback", low_confidence=True))
-    await db_session.flush()
-
-    assert (await client.post("/debt/optimize-from-forecast")).status_code == 200
-    body = (await client.get("/debt/plan/latest")).json()
-
-    assert body["is_stale"] is None and body["extra_monthly_uah"] is None
 
 
 async def test_latest_404_does_not_mention_deprecated_endpoint(client):

@@ -6,8 +6,7 @@ A) POST /debt/optimize {extra_monthly_uah}: бюджет = сума мініма
 B) GET /debt/affordability?extra=&months=: лише читання; історичний місячний
    FCF за останні N повних місяців, частка місяців з FCF >= extra,
    min/max/медіана/P25/P75.
-C) POST /debt/optimize-from-forecast працює як раніше.
-D) GET /debt/plan/latest повертає план без прогнозу.
+C) GET /debt/plan/latest повертає план без прогнозу.
 
 HTTP — через httpx ASGITransport на мінімальному FastAPI з роутером боргів.
 """
@@ -153,10 +152,10 @@ async def test_optimize_infeasible_is_422_with_hint_and_no_plan(db_session, real
 async def test_optimize_solver_error_is_422_not_500(db_session, real_user, client, monkeypatch):
     await _debt(db_session, real_user, name="Розстрочка", balance=10_000, rate=0.02, min_payment=1_000)
 
-    def _boom(*args, **kwargs):
+    async def _boom(*args, **kwargs):
         raise RuntimeError("CBC exploded")
 
-    monkeypatch.setattr(debt_module, "optimize_debt_repayment", _boom)
+    monkeypatch.setattr(debt_module, "optimize_debt_repayment_async", _boom)
 
     resp = await client.post("/debt/optimize", json={"extra_monthly_uah": 500})
 
@@ -186,23 +185,6 @@ async def test_plan_latest_works_with_null_forecast(db_session, real_user, clien
     assert resp.status_code == 200
     assert resp.json()["plan_id"] == created["plan_id"]
     assert resp.json()["forecast_id"] is None
-
-
-# --- C) optimize-from-forecast ---------------------------------------------------------
-
-async def test_optimize_from_forecast_unchanged(db_session, real_user, client):
-    await _debt(db_session, real_user, name="Розстрочка", balance=10_000, rate=0.02, min_payment=1_000)
-    forecast = Forecast(id=str(uuid.uuid4()), user_id=real_user.id, period_start=date(2026, 11, 1),
-                        period_end=date(2026, 11, 30), predicted_income=60_000, predicted_expenses=55_000,
-                        free_cash_flow=5_000, method="average_fallback", low_confidence=True)
-    db_session.add(forecast)
-    await db_session.flush()
-
-    resp = await client.post("/debt/optimize-from-forecast")
-
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["forecast_id"] == forecast.id
-    assert resp.json()["monthly_budget_used"] == 5_000
 
 
 # --- B) GET /debt/affordability -----------------------------------------------------------------

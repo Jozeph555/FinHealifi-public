@@ -5,8 +5,8 @@
 рядки з розбіжністю, тож повторний запуск безпечний.
 
 Запуск (з кореня репозиторію, після `docker-compose up -d`):
-    python -m scripts.data_fixes.fix_amount_uah_kopecks_bug          # лише звіт
-    python -m scripts.data_fixes.fix_amount_uah_kopecks_bug --apply  # звіт і виправлення
+    python -m scripts.data_fixes.fix_amount_uah_kopecks          # лише звіт
+    python -m scripts.data_fixes.fix_amount_uah_kopecks --apply  # звіт і виправлення
 """
 import argparse
 import asyncio

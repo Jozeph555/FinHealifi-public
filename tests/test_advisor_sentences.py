@@ -27,6 +27,7 @@ from sqlalchemy import select
 
 import app.services.advisor_context as advisor_context
 import app.services.llm_advisor as llm_advisor
+from app.services.debt_ledger import today_kyiv, upsert_check
 from app.api.assets import AssetCreateRequest, create_asset
 from app.api.debt import DebtCreateRequest, ExtraPaymentRequest, create_debt, optimize_with_extra
 from app.models.milp_plan import MilpPlan
@@ -233,7 +234,8 @@ async def test_no_plan_context_is_single_sentence(db_session, real_user):
 async def test_stale_plan_context_has_no_plan_numbers(db_session, real_user):
     card = await _two_debts(db_session, real_user)
     await _plan(db_session, real_user, extra=1000.0)
-    card.balance = 9000.0
+    # Залишок змінюється звіркою: debts.balance — лише запасне значення.
+    await upsert_check(db_session, real_user.id, card.id, today_kyiv(), 900_000, "manual_edit")
     await db_session.commit()
 
     context = await build_advisor_context(real_user.id, session=db_session, question="А якби я платив ще 2000?")

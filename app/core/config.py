@@ -38,3 +38,6 @@ if not ANTHROPIC_API_KEY:
     )
 
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+
+# Ліміт часу MILP-розв'язувача CBC, секунди.
+MILP_TIME_LIMIT_SEC = float(os.getenv("MILP_TIME_LIMIT_SEC", "10"))

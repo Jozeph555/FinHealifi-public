@@ -1,5 +1,7 @@
 // Чисті функції сторінки Transactions.jsx.
 
+import { formatUah } from "./money.js";
+
 // Групи категорій з GET /transactions/categories, які можна обрати в
 // select. "custom" — власні категорії витрат користувача (custom_categories;
 // бекенд кладе їх і в expense, тут вони виділені в окрему групу).
@@ -34,17 +36,11 @@ export function allowedGroupsForAmount(amountKopecks) {
   return [...EDITABLE_GROUPS];
 }
 
-// Копійки -> "1 003,57 грн" (зі знаком "+"/"−" для ненульових сум).
-// Цілочисельно, без amount / 100 у float — щоб не було 1003.5699999.
-const UAH_GROUPING = new Intl.NumberFormat("uk-UA", { maximumFractionDigits: 0 });
-
+// Копійки -> сума в єдиному форматі formatUah: зі знаком "+"/"−" для ненульових сум,
+// а з withSign=false — за модулем, без знака.
 export function formatAmountKopecks(amountKopecks, { withSign = true } = {}) {
   if (amountKopecks === null || amountKopecks === undefined) return "—";
-  const abs = Math.abs(amountKopecks);
-  const whole = UAH_GROUPING.format(Math.floor(abs / 100));
-  const cents = String(abs % 100).padStart(2, "0");
-  const sign = !withSign || amountKopecks === 0 ? "" : amountKopecks > 0 ? "+" : "−";
-  return `${sign}${whole},${cents} грн`;
+  return withSign ? formatUah(amountKopecks / 100, { withSign: true }) : formatUah(Math.abs(amountKopecks) / 100);
 }
 
 // Unix-секунди -> "ДД.ММ.РРРР" за Києвом (ті самі календарні дні, що й

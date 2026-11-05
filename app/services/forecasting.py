@@ -34,9 +34,9 @@ from sqlalchemy import select, func, or_, and_, not_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import AsyncSessionLocal
-from app.models.debt import Debt
 from app.models.transaction import Transaction
 from app.models.forecast import Forecast
+from app.services.debt_ledger import active_debt_states
 from app.services.debt_rules import debt_min_payment
 from app.services.mcc_mapping import (
     INCOME_CATEGORIES,
@@ -66,18 +66,11 @@ async def _with_session(session: AsyncSession | None, fn):
 async def _active_debt_min_payments_total(session: AsyncSession, user_id: str) -> float:
     """Повертає суму мінімальних платежів активних боргів за правилами debt_rules.
 
-    Використовуються поточні борги й баланси, зокрема для минулих місяців:
-    історія боргів не зберігається.
+    Використовуються поточні борги й залишки на сьогодні з журналу
+    (debt_ledger), зокрема для минулих місяців.
     """
-    result = await session.execute(
-        select(Debt.debt_type, Debt.balance, Debt.monthly_rate, Debt.min_payment).where(
-            Debt.user_id == user_id, Debt.is_active == True  # noqa: E712
-        )
-    )
-    return sum(
-        debt_min_payment(debt_type, balance, monthly_rate, min_payment)
-        for debt_type, balance, monthly_rate, min_payment in result.all()
-    )
+    states = await active_debt_states(session, user_id)
+    return sum(debt_min_payment(s.debt_type, s.balance, s.monthly_rate, s.min_payment) for s in states)
 
 
 async def _query_expense_breakdown(session: AsyncSession, user_id: str) -> dict:
