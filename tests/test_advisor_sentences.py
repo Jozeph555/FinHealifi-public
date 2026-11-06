@@ -179,15 +179,17 @@ def _mock_reply(monkeypatch, payload: dict):
     monkeypatch.setattr(llm_advisor.client.messages, "create", AsyncMock(return_value=reply))
 
 
-async def test_answer_logs_unknown_number_but_returns_answer(monkeypatch, caplog):
+async def test_answer_with_unknown_number_is_blocked(monkeypatch, caplog):
+    """Число поза контекстом в обох відповідях — детерміновані речення замість відповіді моделі."""
     _mock_reply(monkeypatch, {"answer": "Борги закриються через 9 міс.", "follow_up": []})
-    context = {"sentences": ["За планом усі борги закриються через 11 міс., загальна переплата 17 427 грн."]}
+    sentence = "За планом усі борги закриються через 11 міс., загальна переплата 17 427 грн."
+    context = {"sentences": [sentence], "fallback_sentences": {"general": [sentence]}}
 
     with caplog.at_level(logging.WARNING, logger="app.services.llm_advisor"):
         answer, _ = await answer_question("Коли я закрию борги?", context)
 
-    assert answer == "Борги закриються через 9 міс."
-    assert "числа, яких немає в контексті: [9.0]" in caplog.text
+    assert answer == sentence
+    assert "числа, яких немає в даних: 9" in caplog.text
 
 
 async def test_answer_no_warning_on_correct_answer(monkeypatch, caplog):

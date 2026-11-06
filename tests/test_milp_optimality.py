@@ -55,9 +55,9 @@ def test_milp_beats_heuristics_realistic_portfolio():
     debts = [
         {"name": "Кредитний ліміт", "balance": 50000, "monthly_rate": 0.031,
          "min_payment": None, "debt_type": "revolving"},
-        {"name": "Розстрочка shiny-diski", "balance": 18032, "monthly_rate": 0.0,
-         "min_payment": 2254, "debt_type": "installment"},
-        {"name": "Кредит інший банк", "balance": 75000, "monthly_rate": 0.02,
+        {"name": "Розстрочка (магазин)", "balance": 18000, "monthly_rate": 0.0,
+         "min_payment": 2250, "debt_type": "installment"},
+        {"name": "Кредит (банк Б)", "balance": 75000, "monthly_rate": 0.02,
          "min_payment": 2000, "debt_type": "installment"},
     ]
     assert_milp_not_worse(debts, monthly_budget=15000, months=36)

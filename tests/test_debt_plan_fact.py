@@ -654,6 +654,7 @@ async def test_no_payments_mark_can_be_removed(client, clock):
     await _debt(client)
     await _accept(client, await _draft(client))
     url = "/debt/plan-fact/months/2026-11/no-payments"
+    clock["today"] = date(2026, 12, 3)
 
     marked = await client.put(url, json={"confirmed": True})
     assert marked.status_code == 200, marked.text

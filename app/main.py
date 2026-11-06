@@ -1,7 +1,9 @@
 """
 FastAPI-застосунок: роутери, CORS і запуск планувальника.
 """
+import logging
 from contextlib import asynccontextmanager
+from datetime import date
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,13 +19,29 @@ from app.api.advisor import router as advisor_router
 from app.api.forecast import router as forecast_router
 from app.api.imports import router as imports_router
 from app.api.transactions import router as transactions_router
+from app.core.config import APP_TODAY_OVERRIDE_ENV, today_override
 from app.services.scheduler import start_scheduler, stop_scheduler
+
+logger = logging.getLogger(__name__)
+
+
+def warn_today_override() -> date | None:
+    """Пише WARNING у журнал, якщо задано APP_TODAY_OVERRIDE; повертає цю дату або None."""
+    override = today_override()
+    if override is not None:
+        logger.warning("%s=%s: «сьогодні» для плану й план-факту — %s, а не реальна дата",
+                       APP_TODAY_OVERRIDE_ENV, override.isoformat(), override.isoformat())
+    return override
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Щоденна синхронізація Monobank (app/services/scheduler.py).
-    """Запускає планувальник фонових задач на старті застосунку й зупиняє на завершенні."""
+    """Запускає планувальник фонових задач на старті застосунку й зупиняє на завершенні.
+
+    На старті пише WARNING, якщо задано APP_TODAY_OVERRIDE. Планувальник —
+    щоденна синхронізація Monobank (app/services/scheduler.py).
+    """
+    warn_today_override()
     start_scheduler()
     yield
     stop_scheduler()

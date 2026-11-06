@@ -13,6 +13,9 @@
 - на старті сесії `current_database()` перевіряється на живому з'єднанні, а
   `alembic_version` звіряється з head.
 
+APP_TODAY_OVERRIDE знімається з оточення перед кожним тестом, тож «сьогодні» —
+реальна дата, доки тест не задасть змінну сам.
+
 Ізоляція: кожен тест отримує сесію на з'єднанні з відкритою транзакцією
 (join_transaction_mode="create_savepoint"). `await db.commit()` у тестованому
 коді лише звільняє SAVEPOINT; зовнішня транзакція відкочується після тесту.
@@ -97,6 +100,12 @@ async def _guard_test_database():
             returncode=2,
         )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_today_override(monkeypatch):
+    """Знімає APP_TODAY_OVERRIDE (зокрема з .env) для кожного тесту; тест може задати її сам."""
+    monkeypatch.delenv("APP_TODAY_OVERRIDE", raising=False)
 
 
 @pytest_asyncio.fixture

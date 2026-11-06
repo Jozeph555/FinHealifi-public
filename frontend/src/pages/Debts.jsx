@@ -21,9 +21,10 @@ import {
   materializeTooEarlyText,
   milpMatchesAvalanche,
   notPaidOffLabel,
-  todayKyiv,
+  resolveToday,
   versionTotals,
 } from "../utils/debtPlan";
+import { materializeUnresolvedMonth, serverErrorText, unresolvedMonthLabels } from "../utils/planFact";
 
 // Калькулятор спроможності: додатковий платіж задає користувач; панель
 // показує лише історію, без прогнозу і без рекомендованої суми.
@@ -165,18 +166,32 @@ export default function Debts() {
   const [isMaterializing, setIsMaterializing] = useState(false);
   const materializeInFlight = useRef(false);
   const [materializeError, setMaterializeError] = useState(null);
+  // Місяць, без заповнення якого план не фіксується (unresolved_month відповіді 409); null — немає.
+  const [unresolvedMonth, setUnresolvedMonth] = useState(null);
+  const [unresolvedError, setUnresolvedError] = useState(null);
+  const [isMarkingUnresolved, setIsMarkingUnresolved] = useState(false);
+  // force останньої спроби фіксації: повтор після позначки йде з тим самим force.
+  const lastMaterializeForce = useRef(false);
+  // Запит до блоку «План і факт»: перейти до місяця; лічильник — перечитати план-факт.
+  const [planFactFocus, setPlanFactFocus] = useState(null);
+  const [planFactReload, setPlanFactReload] = useState(0);
   // Автоматична фіксація — один раз за відкриття сторінки.
   const autoMaterializeTried = useRef(false);
 
-  const today = todayKyiv();
+  // Серверна дата (GET /debt/today); до відповіді й без неї — дата браузера за Києвом.
+  const [serverToday, setServerToday] = useState(null);
+  const today = resolveToday(serverToday);
 
   async function loadAll() {
     setIsLoading(true);
-    const [debtsRes, planRes, activeRes] = await Promise.allSettled([
+    const [debtsRes, planRes, activeRes, todayRes] = await Promise.allSettled([
       api.get("/debt"),
       api.get("/debt/plan/latest"),
       api.get("/debt/plan/active"),
+      api.get("/debt/today"),
     ]);
+    const loadedToday = todayRes.status === "fulfilled" ? todayRes.value.data : null;
+    setServerToday(loadedToday);
 
     if (debtsRes.status === "fulfilled") setDebts(debtsRes.value.data);
 
@@ -192,7 +207,7 @@ export default function Debts() {
     setActive(activeVersion);
     setIsLoading(false);
 
-    if (!autoMaterializeTried.current && materializeAction(activeVersion, todayKyiv()) === "auto") {
+    if (!autoMaterializeTried.current && materializeAction(activeVersion, resolveToday(loadedToday)) === "auto") {
       autoMaterializeTried.current = true;
       await handleMaterialize(false);
     }
@@ -211,6 +226,7 @@ export default function Debts() {
     try {
       await api.post(`/debt/plans/${plan.plan_id}/accept`);
       setMaterializeError(null);
+      setUnresolvedMonth(null);
       await reloadActive();
     } catch (err) {
       setAcceptError(acceptErrorText(err.response?.status, responseDetail(err)));
@@ -243,17 +259,44 @@ export default function Debts() {
   async function handleMaterialize(force) {
     if (materializeInFlight.current) return;
     materializeInFlight.current = true;
+    lastMaterializeForce.current = force;
     setIsMaterializing(true);
     setMaterializeError(null);
+    setUnresolvedMonth(null);
+    setUnresolvedError(null);
     try {
       await api.post("/debt/plan/materialize", null, { params: force ? { force: true } : {} });
       await reloadActive();
     } catch (err) {
       setMaterializeError(materializeErrorText(err.response?.status, responseDetail(err)));
+      setUnresolvedMonth(materializeUnresolvedMonth(err.response?.status, err.response?.data));
     } finally {
       materializeInFlight.current = false;
       setIsMaterializing(false);
     }
+  }
+
+  // Позначка «платежів не було» для місяця з відповіді 409 і повторна фіксація з тим самим force.
+  async function handleMarkUnresolved() {
+    if (!unresolvedMonth || isMarkingUnresolved) return;
+    setIsMarkingUnresolved(true);
+    setUnresolvedError(null);
+    try {
+      await api.put(`/debt/plan-fact/months/${unresolvedMonth}/no-payments`, { confirmed: true });
+    } catch (err) {
+      setUnresolvedError(serverErrorText(err.response?.status, err.response?.data?.detail, "Не вдалося змінити позначку"));
+      setIsMarkingUnresolved(false);
+      return;
+    }
+    setIsMarkingUnresolved(false);
+    setPlanFactReload((n) => n + 1);
+    await refreshAfterLedgerChange();
+    await handleMaterialize(lastMaterializeForce.current);
+  }
+
+  // Перемкнути селектор місяця в «План і факт» на місяць з відповіді 409.
+  function handleEnterUnresolved() {
+    if (unresolvedMonth) setPlanFactFocus({ month: unresolvedMonth, nonce: Date.now() });
   }
 
   // Історична спроможність: лише при валідній сумі, з debounce; попередній
@@ -728,7 +771,29 @@ export default function Debts() {
                   </div>
                 )}
                 {materializeError && (
-                  <p className="rounded-lg bg-ink/5 px-3 py-2 text-ink/80">{materializeError}</p>
+                  <div className="space-y-2 rounded-lg bg-ink/5 px-3 py-2">
+                    <p className="text-ink/80">{materializeError}</p>
+                    {unresolvedMonthLabels(unresolvedMonth) && (
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={handleMarkUnresolved}
+                          disabled={isMarkingUnresolved || isMaterializing}
+                          className="rounded-lg border border-forest/40 px-3 py-1.5 text-xs font-medium text-forest transition hover:bg-forest/5 disabled:opacity-50"
+                        >
+                          {unresolvedMonthLabels(unresolvedMonth).mark}
+                        </button>
+                        <button
+                          onClick={handleEnterUnresolved}
+                          className="rounded-lg px-3 py-1.5 text-xs font-medium text-forest underline-offset-2 hover:underline"
+                        >
+                          {unresolvedMonthLabels(unresolvedMonth).enter}
+                        </button>
+                      </div>
+                    )}
+                    {unresolvedError && (
+                      <p className="rounded-lg bg-brick/10 px-3 py-2 text-sm text-brick">{unresolvedError}</p>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -882,7 +947,7 @@ export default function Debts() {
                     .map(([strategy, data]) => (
                       <div
                         key={strategy}
-                        className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 ${
+                        className={`flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg px-3 py-2 ${
                           strategy === "milp" ? "bg-gold/10" : "bg-ink/5"
                         }`}
                       >
@@ -895,7 +960,7 @@ export default function Debts() {
                           )}
                         </div>
                         {isPaidOff(data) ? (
-                          <div className="shrink-0 text-right">
+                          <div className="ml-auto shrink-0 text-right">
                             <p className="text-xs text-ink/50">Переплата</p>
                             <p className="whitespace-nowrap">
                               <span className="font-mono text-sm">{formatUah(data.total_interest_paid)}</span>
@@ -903,7 +968,7 @@ export default function Debts() {
                             </p>
                           </div>
                         ) : (
-                          <span className="shrink-0 text-right text-xs text-brick">
+                          <span className="ml-auto min-w-0 break-words text-right text-xs text-brick">
                             {notPaidOffLabel(plan.horizon_months)}
                           </span>
                         )}
@@ -924,6 +989,8 @@ export default function Debts() {
           debts={debts}
           today={today}
           onLedgerChange={refreshAfterLedgerChange}
+          focusRequest={planFactFocus}
+          reloadToken={planFactReload}
         />
       )}
     </div>

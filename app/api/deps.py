@@ -52,12 +52,12 @@ async def get_current_user(
 
 
 def get_today() -> date:
-    """Повертає сьогоднішню дату за Europe/Kyiv (у тестах залежність підміняється)."""
+    """Повертає сьогоднішню дату за Europe/Kyiv або APP_TODAY_OVERRIDE (у тестах залежність підміняється)."""
     return today_kyiv()
 
 
 def resolve_today(value) -> date:
-    """Повертає value, якщо це дата; інакше сьогоднішню дату за Europe/Kyiv.
+    """Повертає value, якщо це дата; інакше сьогоднішню дату (today_kyiv: Europe/Kyiv або APP_TODAY_OVERRIDE).
 
     Потрібне, коли ендпоінт викликається як звичайна функція і замість
     залежності get_today отримує її маркер.

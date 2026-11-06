@@ -78,18 +78,18 @@ function StrategyComparison({ comparison, horizonMonths, caption = null }) {
         const widthPct = paidOff && maxInterest > 0 ? (data.total_interest_paid / maxInterest) * 100 : 0;
         return (
           <div key={strategy}>
-            <div className="mb-1 flex justify-between gap-3 text-xs">
+            <div className="mb-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 text-xs">
               <span className={`min-w-0 ${strategy === "milp" ? "font-medium text-forest" : "text-ink/50"}`}>
                 {STRATEGY_LABELS[strategy]}
                 {strategy === "milp" && matchesAvalanche ? ` — ${MATCHES_AVALANCHE_NOTE}` : ""}
               </span>
               {paidOff ? (
-                <span className="shrink-0 whitespace-nowrap">
+                <span className="ml-auto shrink-0 whitespace-nowrap">
                   <span className="text-ink/50">Переплата </span>
                   <span className="font-mono">{formatUah(data.total_interest_paid)}</span>
                 </span>
               ) : (
-                <span className="text-brick">{notPaidOffLabel(horizonMonths)}</span>
+                <span className="ml-auto min-w-0 break-words text-right text-brick">{notPaidOffLabel(horizonMonths)}</span>
               )}
             </div>
             {paidOff && (

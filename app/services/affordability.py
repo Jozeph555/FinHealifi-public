@@ -11,6 +11,8 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.debt_ledger import today_kyiv
+
 from app.services.forecasting import (
     _load_coverage,
     _load_expense_breakdown,
@@ -32,7 +34,7 @@ async def historical_free_cash_flow(
         user_id: Id користувача.
         extra: Додатковий платіж, грн; рахується, скільки місяців мали потік не менший.
         months: Скільки останніх повних місяців брати.
-        today: Поточна дата; за замовчуванням date.today().
+        today: Поточна дата; за замовчуванням debt_ledger.today_kyiv().
 
     Returns:
         Словник: extra_uah, n_months_requested, n_months_used, months (помісячний
@@ -40,7 +42,7 @@ async def historical_free_cash_flow(
         якщо повних місяців менше MIN_MONTHS_FOR_SUMMARY; квартилі — лінійна
         інтерполяція), data_stale і explanation.
     """
-    today = today or date.today()
+    today = today or today_kyiv()
     income_df = await _load_monthly_series(user_id, income=True, session=session)
     breakdown = await _load_expense_breakdown(user_id, session=session)
     coverage, _ = await _load_coverage(session, user_id)

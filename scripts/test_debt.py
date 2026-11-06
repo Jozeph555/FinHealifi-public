@@ -13,14 +13,14 @@ DEBTS = [
         "debt_type": "revolving"
     },
     {
-        "name": "Розстрочка shiny-diski",
-        "balance": 18032,
+        "name": "Розстрочка (магазин)",
+        "balance": 18000,
         "monthly_rate": 0.0,
-        "min_payment": 2254,
+        "min_payment": 2250,
         "debt_type": "installment"
     },
     {
-        "name": "Кредит інший банк",
+        "name": "Кредит (банк Б)",
         "balance": 75000,
         "monthly_rate": 0.02,
         "min_payment": 2000,

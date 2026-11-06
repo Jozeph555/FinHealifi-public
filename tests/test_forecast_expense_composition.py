@@ -162,8 +162,8 @@ async def test_pending_p2p_inflow_is_not_income(db_session, real_user, account):
 # --- Борги та кредити ----------------------------------------------------
 
 async def test_debt_payment_deducted_up_to_installment_min_payment(db_session, real_user, account):
-    await _debt(db_session, real_user.id, "installment", 18032, min_payment=2254)
-    await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 4), -2254, "Борги та кредити", method="keyword")
+    await _debt(db_session, real_user.id, "installment", 18000, min_payment=2250)
+    await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 4), -2250, "Борги та кредити", method="keyword")
     await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 6), -1000, "Продукти", mcc=5411)
 
     assert await _expenses_by_month(db_session, real_user.id) == {"2026-08": 1000.0}
@@ -171,11 +171,11 @@ async def test_debt_payment_deducted_up_to_installment_min_payment(db_session, r
 
 async def test_debt_deduction_capped_by_sum_of_min_payments(db_session, real_user, account):
     await _debt(db_session, real_user.id, "installment", 50000, min_payment=2000)
-    await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 4), -2254, "Борги та кредити", method="keyword")
+    await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 4), -2250, "Борги та кредити", method="keyword")
     await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 6), -1000, "Продукти", mcc=5411)
 
-    # 254 грн платежів понад мінімуми лишаються витратою
-    assert await _expenses_by_month(db_session, real_user.id) == {"2026-08": 1254.0}
+    # 250 грн платежів понад мінімуми лишаються витратою
+    assert await _expenses_by_month(db_session, real_user.id) == {"2026-08": 1250.0}
 
 
 @pytest.mark.parametrize(
@@ -194,16 +194,16 @@ async def test_revolving_min_payment_uses_milp_formula(db_session, real_user, ac
 
 
 async def test_inactive_debts_are_not_deducted(db_session, real_user, account):
-    await _debt(db_session, real_user.id, "installment", 18032, min_payment=2254, is_active=False)
-    await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 4), -2254, "Борги та кредити", method="keyword")
+    await _debt(db_session, real_user.id, "installment", 18000, min_payment=2250, is_active=False)
+    await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 4), -2250, "Борги та кредити", method="keyword")
 
-    assert await _expenses_by_month(db_session, real_user.id) == {"2026-08": 2254.0}
+    assert await _expenses_by_month(db_session, real_user.id) == {"2026-08": 2250.0}
 
 
 async def test_debt_category_without_debts_stays_expense(db_session, real_user, account):
-    await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 4), -2254, "Борги та кредити", method="keyword")
+    await _txn(db_session, real_user.id, account.id, _ts(2026, 8, 4), -2250, "Борги та кредити", method="keyword")
 
-    assert await _expenses_by_month(db_session, real_user.id) == {"2026-08": 2254.0}
+    assert await _expenses_by_month(db_session, real_user.id) == {"2026-08": 2250.0}
 
 
 # --- Розбивка у Forecast.raw_output і у відповіді API --------------------
@@ -220,13 +220,13 @@ async def test_forecast_exposes_breakdown_and_uncategorized_fields(db_session, r
         await _txn(db_session, uid, acc, _ts(2026, month, 5), -300, "pending", mcc=5699)
         await _txn(db_session, uid, acc, _ts(2026, month, 6), -400, "pending", mcc=4829)
         await _txn(db_session, uid, acc, _ts(2026, month, 7), 100, "pending", mcc=4829)
-        await _txn(db_session, uid, acc, _ts(2026, month, 8), -2254, "Борги та кредити", method="keyword")
+        await _txn(db_session, uid, acc, _ts(2026, month, 8), -2250, "Борги та кредити", method="keyword")
     await db_session.commit()
 
     forecast = await generate_forecast(uid, session=db_session, today=date(2026, 9, 15))
 
-    # 1000 + 500 + 300 + max(0, 400-100) + (2254 - min(2254, 2000)) = 2354
-    assert forecast.predicted_expenses == 2354.0
+    # 1000 + 500 + 300 + max(0, 400-100) + (2250 - min(2250, 2000)) = 2350
+    assert forecast.predicted_expenses == 2350.0
 
     month = {m["month"]: m for m in forecast.raw_output["expense_breakdown"]["months"]}["2026-08"]
     assert month["month"] == "2026-08"
@@ -235,9 +235,9 @@ async def test_forecast_exposes_breakdown_and_uncategorized_fields(db_session, r
     assert month["pending_p2p_out"] == 400.0
     assert month["pending_p2p_in"] == 100.0
     assert month["pending_p2p_net"] == 300.0
-    assert month["debt_category_out"] == 2254.0
+    assert month["debt_category_out"] == 2250.0
     assert month["debt_deduction"] == 2000.0
-    assert month["total"] == 2354.0
+    assert month["total"] == 2350.0
     # expense_breakdown — діагностика по всій історії: 3 місяці по 1000
     assert forecast.raw_output["expense_breakdown"]["by_category"]["Продукти"] == 3000.0
 
@@ -246,18 +246,18 @@ async def test_forecast_exposes_breakdown_and_uncategorized_fields(db_session, r
     assert "months_basis" not in response
     assert response["uncategorized_outflow_avg_per_month"] == 700.0
     assert response["uncategorized_inflow_avg_per_month"] == 100.0
-    assert response["debt_payments_outside_list_avg_per_month"] == 254.0
+    assert response["debt_payments_outside_list_avg_per_month"] == 250.0
 
 
 async def test_breakdown_components_sum_to_monthly_total(db_session, real_user, account):
     """Для кожного місяця categorized + pending_merchant + pending_p2p_net - debt_deduction == total == y ряду."""
     await _debt(db_session, real_user.id, "revolving", 10000, rate=0.03)
-    await _debt(db_session, real_user.id, "installment", 18032, min_payment=2254)
+    await _debt(db_session, real_user.id, "installment", 18000, min_payment=2250)
     uid, acc = real_user.id, account.id
     for month in (6, 7, 8):
         await _txn(db_session, uid, acc, _ts(2026, month, 2), -1000 - month, "Продукти", mcc=5411)
         await _txn(db_session, uid, acc, _ts(2026, month, 3), -300 * month, "Готівка", mcc=6011)
-        await _txn(db_session, uid, acc, _ts(2026, month, 4), -2254, "Борги та кредити", method="keyword")
+        await _txn(db_session, uid, acc, _ts(2026, month, 4), -2250, "Борги та кредити", method="keyword")
         await _txn(db_session, uid, acc, _ts(2026, month, 5), -250, "pending", mcc=5699)
         await _txn(db_session, uid, acc, _ts(2026, month, 6), -90, None, mcc=None)
         await _txn(db_session, uid, acc, _ts(2026, month, 7), -100 * month, "pending", mcc=4829)

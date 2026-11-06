@@ -15,9 +15,13 @@ export const MATCHES_AVALANCHE_NOTE = "збігається з варіанто�
 // Переплати, що відрізняються не більше ніж на цю суму, вважаються однаковими.
 const SAME_INTEREST_TOLERANCE_UAH = 1;
 
-// Підпис для стратегії, що не погашає борги за горизонт планування.
+// Горизонт плану за замовчуванням, міс. (як PLAN_HORIZON_MONTHS на сервері).
+export const DEFAULT_PLAN_HORIZON_MONTHS = 36;
+
+// Підпис для стратегії, що не погашає борги за горизонт планування; без горизонту — за
+// DEFAULT_PLAN_HORIZON_MONTHS.
 export function notPaidOffLabel(horizonMonths) {
-  return horizonMonths ? `не погашається за ${horizonMonths} міс.` : "не погашається за горизонт плану";
+  return `не погашається за ${horizonMonths || DEFAULT_PLAN_HORIZON_MONTHS} міс.`;
 }
 
 // Чи погашає стратегія всі борги за горизонт (тільки тоді її переплату можна порівнювати).
@@ -98,6 +102,18 @@ export function todayKyiv(now = new Date()) {
     month: "2-digit",
     day: "2-digit",
   }).format(now);
+}
+
+// Дата «сьогодні» для плану: з сервера (GET /debt/today — Europe/Kyiv або APP_TODAY_OVERRIDE), а якщо
+// її ще немає чи запит не вдався — todayKyiv() браузера.
+export function resolveToday(serverToday, now = new Date()) {
+  const value = serverToday?.today;
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : todayKyiv(now);
+}
+
+// Помітка демонстраційної дати (сервер запущено з APP_TODAY_OVERRIDE); null — дата реальна.
+export function demoDateText(serverToday) {
+  return serverToday?.demo === true && serverToday.today ? `Демонстраційна дата: ${serverToday.today}` : null;
 }
 
 // Чи чернетка — джерело вже прийнятої версії (тоді окремого блоку чернетки немає).

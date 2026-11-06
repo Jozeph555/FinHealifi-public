@@ -31,6 +31,11 @@ export function parseMoneyInput(raw, { allowZero = false } = {}) {
   return { value, error: null };
 }
 
+// Речення наслідку (GET /debt/plan-fact/outcome): готовий текст сервера; null — наслідку немає.
+export function outcomeText(outcome) {
+  return typeof outcome?.sentence === "string" && outcome.sentence.trim() ? outcome.sentence : null;
+}
+
 // "YYYY-MM" -> назва місяця з великої літери і рік, напр. "Листопад YYYY".
 export function formatMonthUk(month) {
   const match = /^(\d{4})-(\d{2})$/.exec(String(month ?? ""));
@@ -38,7 +43,7 @@ export function formatMonthUk(month) {
   return `${MONTHS_NOMINATIVE[Number(match[2]) - 1]} ${match[1]}`;
 }
 
-// Місяць для вибору за замовчуванням: поточний (today — todayKyiv(), тож межа місяця
+// Місяць для вибору за замовчуванням: поточний (today — серверна дата за Києвом, тож межа місяця
 // за Києвом), якщо він є серед місяців, інакше останній.
 export function defaultMonth(months, today) {
   if (!months?.length) return null;
@@ -184,13 +189,53 @@ export function cumulativeView(cumulative) {
 export const NO_PAYMENTS_BUTTON_LABEL = "Платежів не було";
 export const NO_PAYMENTS_UNDO_LABEL = "Скасувати позначку «платежів не було»";
 
-// Яку дію з позначкою показати для місяця: "mark" — платежів не внесено і місяць можна змінювати;
-// "unmark" — позначку вже поставлено і місяць можна змінювати; null — жодної.
+export const MONTH_ONGOING_TEXT = "Місяць ще триває";
+
+// Яку дію з позначкою показати для місяця, який можна змінювати:
+// "unmark" — позначку вже поставлено (no_payments_mark), зокрема на місяці, що ще триває;
+// "mark" — закритий місяць без платежів; "ongoing" — місяць без платежів ще триває, позначити
+// не можна (замість кнопки — MONTH_ONGOING_TEXT); null — жодної.
 export function noPaymentsAction(month) {
   if (!month?.editable) return null;
-  if (month.entry_state === "not_entered") return "mark";
-  if (month.entry_state === "no_payments_confirmed") return "unmark";
-  return null;
+  const marked = month.no_payments_mark ?? month.entry_state === "no_payments_confirmed";
+  if (marked) return "unmark";
+  if (month.entry_state !== "not_entered") return null;
+  return month.closed ? "mark" : "ongoing";
+}
+
+// --- незаповнений місяць у відповіді фіксації ---------------------------------------------------
+
+const MONTHS_NOMINATIVE_LOWER = MONTHS_NOMINATIVE.map((name) => name.toLowerCase());
+
+// "YYYY-MM" -> "листопад 2026 р." (як місяць у реченнях сервера); null — не місяць.
+export function monthNameUk(month) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(month ?? ""));
+  if (!match || Number(match[2]) < 1 || Number(match[2]) > 12) return null;
+  return `${MONTHS_NOMINATIVE_LOWER[Number(match[2]) - 1]} ${match[1]} р.`;
+}
+
+// Місяць, який треба заповнити, щоб зафіксувати план: поле unresolved_month відповіді 409
+// POST /debt/plan/materialize; null — інша причина відмови.
+export function materializeUnresolvedMonth(status, data) {
+  if (status !== 409) return null;
+  const month = data?.unresolved_month;
+  return monthNameUk(month) ? month : null;
+}
+
+// Підписи дій під повідомленням про незаповнений місяць; null — місяця немає.
+export function unresolvedMonthLabels(month) {
+  const name = monthNameUk(month);
+  if (!name) return null;
+  return {
+    mark: `Позначити, що платежів за ${name} не було`,
+    enter: `Внести платежі за ${name}`,
+  };
+}
+
+// Місяць для селектора після запиту перейти до місяця requested: requested, якщо він є
+// серед місяців, інакше поточний вибір current.
+export function focusedMonth(months, requested, current) {
+  return requested && months?.some((m) => m.month === requested) ? requested : current;
 }
 
 // --- звірка залишку з випискою ---------------------------------------------------------------

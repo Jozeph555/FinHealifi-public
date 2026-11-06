@@ -4,8 +4,8 @@
 
 Відповідь з виразом з RETRY_PATTERNS або зі згадкою заощаджень без сценарію
 й без питання про них генерується ще раз з повідомленням-коригуванням;
-повертається друга відповідь, навіть якщо вона теж порушує правила (тоді
-запис у лозі). Claude API не викликається: клієнт моделі замінено заглушкою.
+якщо й друга порушує правила — запис у лозі й детермінована відповідь з
+речень контексту для категорії питання. Claude API не викликається: клієнт моделі замінено заглушкою.
 """
 import json
 import logging
@@ -101,15 +101,16 @@ async def test_violating_first_answer_replaced_by_clean_second(monkeypatch, capl
     assert "повторна відповідь теж порушила правила" not in caplog.text
 
 
-async def test_both_answers_violate_second_returned_and_logged(monkeypatch, caplog):
+async def test_both_answers_violate_backend_sentences_returned_and_logged(monkeypatch, caplog):
     first = "Найкраще продовжувати платити."
     second = "Можна змінити стратегію, і це добре."
     mock = _mock_replies(monkeypatch, first, second)
 
     with caplog.at_level(logging.WARNING, logger="app.services.llm_advisor"):
-        answer, _ = await answer_question("Що мені робити?", CONTEXT)
+        answer, follow_up = await answer_question("Що мені робити?", CONTEXT)
 
-    assert answer == second
+    assert answer == llm_advisor.fallback_answer("Що мені робити?", CONTEXT)
+    assert answer != second and follow_up == []
     assert mock.await_count == 2
     assert "повторна відповідь теж порушила правила" in caplog.text
     assert "вираз «змінити стратегію»" in caplog.text

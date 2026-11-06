@@ -13,7 +13,8 @@
 
 Стан внесення місяця (на рівні користувача): 'entered' — є хоч один платіж
 за будь-яким боргом; 'no_payments_confirmed' — користувач позначив, що
-платежів не було; інакше 'not_entered'. Місяць 'not_entered' не дає
+платежів не було (рахується лише для закритого місяця, строго раніше за
+поточний); інакше 'not_entered'. Місяць 'not_entered' не дає
 розбіжності: фактичні платежі й залишки в ньому і далі до наступної звірки
 невідомі.
 """
@@ -47,12 +48,19 @@ NO_PAYMENTS_CONFIRMED = "no_payments_confirmed"
 
 
 class PlanFactError(Exception):
-    """Помилка правил план-факту з HTTP-кодом і текстом для користувача."""
+    """Помилка правил план-факту з HTTP-кодом, текстом для користувача і машинозчитними полями.
 
-    def __init__(self, status_code: int, detail: str):
+    Args:
+        status_code: HTTP-код відповіді.
+        detail: Текст для користувача.
+        extra: Додаткові поля тіла відповіді поряд із detail.
+    """
+
+    def __init__(self, status_code: int, detail: str, extra: dict | None = None):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+        self.extra = extra or {}
 
 
 # --- дати версій ----------------------------------------------------------------------
@@ -106,8 +114,12 @@ def month_locked(versions: list[DebtPlanVersion], month: date) -> bool:
     return any(v.materialized_at is not None and version_acted(v) and v.effective_from > month for v in versions)
 
 
-async def month_entry_state(session: AsyncSession, user_id: str, month: date) -> str:
-    """Повертає стан внесення місяця: entered, no_payments_confirmed або not_entered."""
+async def month_entry_state(session: AsyncSession, user_id: str, month: date, today: date) -> str:
+    """Повертає стан внесення місяця: entered, no_payments_confirmed або not_entered.
+
+    Позначка «платежів не було» рахується лише для закритого місяця (строго
+    раніше за місяць today); на незакритому місяці вона не заповнює місяць.
+    """
     has_payment = (await session.execute(
         select(DebtPayment.id).where(
             DebtPayment.user_id == user_id,
@@ -118,7 +130,7 @@ async def month_entry_state(session: AsyncSession, user_id: str, month: date) ->
     if has_payment:
         return ENTERED
     mark = await session.get(DebtPlanMonth, (user_id, month))
-    if mark is not None and mark.no_payments_confirmed:
+    if mark is not None and mark.no_payments_confirmed and ledger.month_closed(month, today):
         return NO_PAYMENTS_CONFIRMED
     return NOT_ENTERED
 
@@ -135,13 +147,68 @@ class Snapshot:
     solver_status: str
 
 
-async def build_snapshot(version_id: str, states: list[ledger.DebtState], start: dict[str, int],
-                         extra_kop: int, first_month: date) -> Snapshot:
-    """Розв'язує план від стартових залишків і проводить його платежі через roll_month.
+@dataclass
+class RolledSolution:
+    """Розв'язок, проведений через roll_month: рядки (індекс місяця, debt_id, MonthRoll), строк, відсотки."""
+    rows: list[tuple[int, str, ledger.MonthRoll]]
+    months_to_payoff: int | None
+    total_interest_kop: int
+
+
+def roll_solution(debts: list[ledger.DebtState], start: dict[str, int], monthly_log: list[dict]) -> RolledSolution:
+    """Проводить платежі розв'язку (MILP чи симуляції) через roll_month у копійках.
 
     Платежі розв'язку округлюються half-up до копійки; у місяці, де розв'язок
-    погашає борг, плановий платіж дорівнює боргу з відсотками, тож залишок
-    стає рівно 0. Ключ боргу в розв'язку — debt_id.
+    погашає борг (залишок не більший за PAID_OFF_TOLERANCE_UAH), платіж
+    дорівнює боргу з відсотками, тож залишок стає рівно 0.
+
+    Args:
+        debts: Борги; ключ боргу в розв'язку — debt_id.
+        start: Стартові залишки в копійках за debt_id.
+        monthly_log: Помісячний журнал розв'язку (payments і balances за debt_id).
+
+    Returns:
+        RolledSolution; months_to_payoff — None, якщо борги не погашено за журнал.
+    """
+    balances = {s.id: start[s.id] for s in debts}
+    rows: list[tuple[int, str, ledger.MonthRoll]] = []
+    total_interest = 0
+    months_to_payoff = None
+    for k, entry in enumerate(monthly_log):
+        for s in debts:
+            opening = balances[s.id]
+            if opening <= 0:
+                continue
+            payment = ledger.uah_to_kop(entry["payments"].get(s.id, 0))
+            roll = ledger.roll_month(opening, s.monthly_rate, payment)
+            if roll.closing > 0 and entry["balances"].get(s.id, 0) <= PAID_OFF_TOLERANCE_UAH:
+                roll = ledger.roll_month(opening, s.monthly_rate, opening + roll.interest)
+            rows.append((k, s.id, roll))
+            total_interest += roll.interest
+            balances[s.id] = roll.closing
+        if all(b == 0 for b in balances.values()):
+            months_to_payoff = k + 1
+            break
+    return RolledSolution(rows=rows, months_to_payoff=months_to_payoff, total_interest_kop=total_interest)
+
+
+def schedule_min_payments_total(rows: list[DebtPlanSchedule], debts: dict[str, Debt]) -> float | None:
+    """Обов'язкові платежі від стартових залишків першого місяця розкладу, грн; None без розкладу."""
+    if not rows:
+        return None
+    first_month = min(r.month for r in rows)
+    return round(sum(
+        debt_min_payment(debts[r.debt_id].debt_type, ledger.kop_to_uah(r.opening_kop),
+                         debts[r.debt_id].monthly_rate, debts[r.debt_id].min_payment)
+        for r in rows if r.month == first_month
+    ), 2)
+
+
+async def build_snapshot(version_id: str, states: list[ledger.DebtState], start: dict[str, int],
+                         extra_kop: int, first_month: date) -> Snapshot:
+    """Розв'язує план від стартових залишків і проводить його платежі через roll_solution.
+
+    Ключ боргу в розв'язку — debt_id.
 
     Args:
         version_id: Id версії для рядків знімка.
@@ -174,29 +241,12 @@ async def build_snapshot(version_id: str, states: list[ledger.DebtState], start:
     if milp["status"] != "Optimal" and not fallback:
         raise PlanFactError(422, "Не вдалося розрахувати план за поточних залишків і додаткового платежу.")
 
-    balances = {s.id: start[s.id] for s in debts}
-    rows: list[DebtPlanSchedule] = []
-    total_interest = 0
-    months_to_payoff = None
-    for k, entry in enumerate(milp["monthly_log"]):
-        month = ledger.add_months(first_month, k)
-        for s in debts:
-            opening = balances[s.id]
-            if opening <= 0:
-                continue
-            payment = ledger.uah_to_kop(entry["payments"].get(s.id, 0))
-            roll = ledger.roll_month(opening, s.monthly_rate, payment)
-            if roll.closing > 0 and entry["balances"].get(s.id, 0) <= PAID_OFF_TOLERANCE_UAH:
-                roll = ledger.roll_month(opening, s.monthly_rate, opening + roll.interest)
-            rows.append(DebtPlanSchedule(version_id=version_id, month=month, debt_id=s.id, opening_kop=roll.opening,
-                                         interest_kop=roll.interest, planned_payment_kop=roll.paid,
-                                         closing_kop=roll.closing))
-            total_interest += roll.interest
-            balances[s.id] = roll.closing
-        if all(b == 0 for b in balances.values()):
-            months_to_payoff = k + 1
-            break
-    return Snapshot(rows=rows, months_to_payoff=months_to_payoff, total_interest_kop=total_interest,
+    rolled = roll_solution(debts, start, milp["monthly_log"])
+    rows = [DebtPlanSchedule(version_id=version_id, month=ledger.add_months(first_month, k), debt_id=debt_id,
+                             opening_kop=roll.opening, interest_kop=roll.interest, planned_payment_kop=roll.paid,
+                             closing_kop=roll.closing)
+            for k, debt_id, roll in rolled.rows]
+    return Snapshot(rows=rows, months_to_payoff=rolled.months_to_payoff, total_interest_kop=rolled.total_interest_kop,
                     strategy="avalanche_fallback" if fallback else "milp", solver_status=milp["status"])
 
 
@@ -327,11 +377,12 @@ async def materialize(session: AsyncSession, user_id: str, force: bool = False,
             "Щоб зафіксувати попередній місяць зараз, повтори запит з force=true.",
         )
     previous = ledger.add_months(version.effective_from, -1)
-    if await month_entry_state(session, user_id, previous) == NOT_ENTERED:
+    if await month_entry_state(session, user_id, previous, today) == NOT_ENTERED:
         raise PlanFactError(
             409,
-            f"За {ledger.format_month(previous)} не внесено жодного платежу. "
+            f"За {ledger.month_name(previous)} не внесено жодного платежу. "
             "Внеси платежі або познач, що платежів не було.",
+            extra={"unresolved_month": ledger.format_month(previous)},
         )
 
     debts = (await session.execute(
@@ -362,7 +413,7 @@ async def ensure_month_editable(session: AsyncSession, user_id: str, day: date, 
     versions = await user_versions(session, user_id)
     if month_locked(versions, ledger.month_start(day)):
         raise PlanFactError(
-            409, f"Місяць {ledger.format_month(ledger.month_start(day))} закрито: він належить попередній версії плану."
+            409, f"Місяць {ledger.month_name(ledger.month_start(day))} закрито: він належить попередній версії плану."
         )
 
 
@@ -451,7 +502,7 @@ async def plan_fact(session: AsyncSession, user_id: str, from_month: date | None
     def entry_state(month: date) -> str:
         if month in pay_months:
             return ENTERED
-        return NO_PAYMENTS_CONFIRMED if marks.get(month) else NOT_ENTERED
+        return NO_PAYMENTS_CONFIRMED if marks.get(month) and month < current_month else NOT_ENTERED
 
     # Залишок на кінець кожного місяця, зокрема поточного (з уже внесеними
     # платежами): так фактичний і плановий залишки порівнюються на ту саму дату.
@@ -539,6 +590,7 @@ async def plan_fact(session: AsyncSession, user_id: str, from_month: date | None
             "closed": month < current_month,
             "editable": (not month_locked(versions, month)) and month <= current_month,
             "entry_state": state,
+            "no_payments_mark": bool(marks.get(month)),
             "counted_from": first.accepted_on if month == first.effective_from else None,
             "debts": rows,
             "totals": {

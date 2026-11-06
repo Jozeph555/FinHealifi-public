@@ -3,8 +3,11 @@ AI-радник на Claude API.
 
 Модель лише пояснює простими словами готові речення з advisor_context.py.
 Фінансових розрахунків вона не робить: усі числа вже є в контексті. Відповідь
-моделі перевіряється (лише запис у лог, відповідь не блокується): числа, яких
-немає в контексті чи в питанні, і заборонені слова.
+на запитання перевіряється: число, якого немає в контексті чи в питанні,
+вираз-оцінка чи вердикт без опори в даних — порушення, після якого модель
+генерує відповідь ще раз; за повторного порушення радник відповідає
+детермінованими реченнями контексту для категорії питання. Заборонені слова
+лише пишуться в лог.
 """
 import json
 import logging
@@ -14,7 +17,7 @@ import re
 from anthropic import AsyncAnthropic
 
 from app.core.config import ANTHROPIC_API_KEY, CLAUDE_MODEL
-from app.services.advisor_context import is_savings_question
+from app.services.advisor_context import is_savings_question, question_category
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 logger = logging.getLogger(__name__)
@@ -43,6 +46,8 @@ EXAMPLES_BLOCK = EXAMPLES_HEADER + """
 Відповідь: Я відповідаю лише про твої борги і план їх погашення. Можеш запитати, наприклад: «Коли я закрию
 всі борги?»
 """
+
+NO_DATA_ANSWER = "Даних для цієї відповіді немає."
 
 SYSTEM_PROMPT = """Ти — помічник, який простими словами пояснює людині її борги і план їх погашення.
 
@@ -77,6 +82,12 @@ SYSTEM_PROMPT = """Ти — помічник, який простими слов
   суму заощаджень, назви факт з даних; якщо в даних є сценарій із заощадженнями, опиши його з умовою.
 - Не кажи про зміну чи вибір стратегії: у застосунку план розраховується один, вибору стратегії немає.
 - Не пиши «це добре», «це гарно», «найкраще» та інших оцінок.
+- На запитання, чи виконується план, і про внесені платежі за минулі місяці відповідай лише реченнями
+  після рядка «Статус закритих місяців від першого прийнятого плану» і реченням «Разом за закриті місяці»,
+  передаючи їхні числа без змін. На запитання про різницю з попереднім планом відповідай лише реченням
+  «Попередній план …». Якщо потрібного речення в даних немає, відповідай: «""" + NO_DATA_ANSWER + """»
+- Не роби висновків «виконуєш план», «не виконуєш план», «як і планувалось», «як і розраховано»,
+  «змін немає», «співпадає», якщо цих слів немає в даних.
 
 """ + EXAMPLES_BLOCK
 
@@ -122,6 +133,17 @@ RETRY_PATTERNS = {
 }
 _RETRY_RES = {phrase: re.compile(pattern, re.IGNORECASE) for phrase, pattern in RETRY_PATTERNS.items()}
 _SAVINGS_WORD_RE = re.compile(r"заощадж", re.IGNORECASE)
+
+# Висновки про виконання плану й збіг планів: порушення, якщо їх немає в контексті.
+PLAN_VERDICT_PATTERNS = {
+    "виконуєш план": r"\bвиконуєш\b",
+    "виконується план": r"\bплан\s+виконуєт|\bвиконуєт\w*\s+план",
+    "як і планувалось": r"як\s+і\s+планувал",
+    "як і розраховано": r"як\s+і\s+розрахова",
+    "змін немає": r"змін\s+немає|немає\s+змін",
+    "співпадає": r"співпада|збігаєт",
+}
+_PLAN_VERDICT_RES = {phrase: re.compile(pattern, re.IGNORECASE) for phrase, pattern in PLAN_VERDICT_PATTERNS.items()}
 CORRECTION_TEMPLATE = (
     "Попередня відповідь порушила правила: {violations}. "
     "Відповідай знову за правилами, без цих елементів."
@@ -129,6 +151,10 @@ CORRECTION_TEMPLATE = (
 
 # Число з можливими пробілами між тисячами і дробовою частиною: «12 345», «1 234,56», «36».
 _NUMBER_RE = re.compile(r"\d{1,3}(?:[   ]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?")
+# Те саме число з необов'язковим «тис.» після нього: «50 тис.», «48,7 тис».
+_NUMBER_WITH_SCALE_RE = re.compile(
+    r"(\d{1,3}(?:[   ]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)(\s*тис\b\.?)?", re.IGNORECASE
+)
 NUMBER_TOLERANCE_UAH = 1.0
 
 
@@ -150,13 +176,39 @@ def extract_numbers(text: str) -> list[float]:
     return numbers
 
 
+def _answer_numbers(text: str) -> list[tuple[float, float]]:
+    """Числа відповіді з допуском: (значення, допуск).
+
+    Звичайне число — допуск NUMBER_TOLERANCE_UAH. Число з «тис.» множиться на
+    1000, а допуск — половина одиниці останнього показаного розряду
+    («50 тис.» — 500, «48,7 тис.» — 50), тож дозволене округлення до тисяч.
+    """
+    result = []
+    for raw, scale in _NUMBER_WITH_SCALE_RE.findall(text):
+        cleaned = re.sub(r"[   ]", "", raw).replace(",", ".")
+        value = float(cleaned)
+        if scale:
+            decimals = len(cleaned.split(".")[1]) if "." in cleaned else 0
+            result.append((value * 1000, 1000 * 0.5 * 10 ** -decimals))
+        else:
+            result.append((value, NUMBER_TOLERANCE_UAH))
+    return result
+
+
 def find_unknown_numbers(answer: str, allowed_text: str) -> list[float]:
-    """Повертає числа з відповіді, яких немає в allowed_text з допуском NUMBER_TOLERANCE_UAH."""
+    """Повертає числа з відповіді, яких немає в allowed_text з урахуванням допуску (_answer_numbers)."""
     allowed = extract_numbers(allowed_text)
     return [
-        n for n in extract_numbers(answer)
-        if not any(abs(n - a) <= NUMBER_TOLERANCE_UAH for a in allowed)
+        n for n, tolerance in _answer_numbers(answer)
+        if not any(abs(n - a) <= tolerance for a in allowed)
     ]
+
+
+def _number_text(value: float) -> str:
+    """Число для повідомлення-коригування: «1 300», «0.5»."""
+    if value == int(value):
+        return f"{int(value):,}".replace(",", " ")
+    return str(value)
 
 
 def find_banned_words(text: str) -> list[str]:
@@ -167,11 +219,20 @@ def find_banned_words(text: str) -> list[str]:
 def find_rule_violations(answer: str, context: dict, question: str) -> list[str]:
     """Повертає порушення, через які відповідь генерується повторно.
 
-    Порушення — вираз з RETRY_PATTERNS або згадка заощаджень, коли в контексті
+    Порушення — вираз з RETRY_PATTERNS, висновок з PLAN_VERDICT_PATTERNS,
+    якого немає в реченнях контексту, число, якого немає ні в контексті, ні в
+    питанні (find_unknown_numbers), або згадка заощаджень, коли в контексті
     немає сценарію з ними (context["savings_scenario"]) і питання не про
     заощадження.
     """
     violations = [f"вираз «{phrase}»" for phrase, pattern in _RETRY_RES.items() if pattern.search(answer)]
+    context_text = _format_context(context)
+    unknown = find_unknown_numbers(answer, f"{context_text}\n{question}")
+    if unknown:
+        violations.append("числа, яких немає в даних: " + ", ".join(_number_text(n) for n in unknown)
+                          + " (бери числа лише з даних, нічого не рахуй)")
+    violations += [f"висновок «{phrase}», якого немає в даних" for phrase, pattern in _PLAN_VERDICT_RES.items()
+                   if pattern.search(answer) and not pattern.search(context_text)]
     if (_SAVINGS_WORD_RE.search(answer) and not context.get("savings_scenario")
             and not is_savings_question(question)):
         violations.append("згадка заощаджень, про які не питали")
@@ -186,6 +247,15 @@ def _log_answer_issues(kind: str, answer: str, allowed_text: str) -> None:
     banned = find_banned_words(answer)
     if banned:
         logger.warning("радник (%s): у відповіді заборонені слова: %s", kind, banned)
+
+
+def fallback_answer(question: str, context: dict) -> str:
+    """Детермінована відповідь: речення контексту для категорії питання (question_category).
+
+    Без речень для категорії — NO_DATA_ANSWER.
+    """
+    sentences = (context.get("fallback_sentences") or {}).get(question_category(question)) or []
+    return " ".join(sentences) if sentences else NO_DATA_ANSWER
 
 
 def _format_context(context: dict) -> str:
@@ -255,10 +325,11 @@ def _parse_answer(raw: str) -> tuple[str, list[str]]:
 async def answer_question(question: str, context: dict) -> tuple[str, list[str]]:
     """Відповідає на запитання користувача й пропонує два наступні запитання.
 
-    Якщо відповідь порушує правила (find_rule_violations), модель викликається
-    ще один раз з повідомленням-коригуванням і повертається друга відповідь,
-    навіть якщо вона теж порушує правила (тоді це пишеться в лог). Числа й
-    заборонені слова фінальної відповіді лише пишуться в лог.
+    Якщо відповідь порушує правила (find_rule_violations, зокрема число поза
+    контекстом), модель викликається ще один раз з повідомленням-коригуванням.
+    Якщо й друга відповідь порушує правила, повертається fallback_answer —
+    речення контексту для категорії питання — без наступних запитань.
+    Заборонені слова фінальної відповіді лише пишуться в лог.
 
     Args:
         question: Запитання користувача.
@@ -266,7 +337,7 @@ async def answer_question(question: str, context: dict) -> tuple[str, list[str]]
 
     Returns:
         Пара (відповідь, наступні запитання). Якщо відповідь моделі не JSON —
-        (сирий текст, []).
+        (сирий текст, []); детермінована відповідь — (речення, []).
     """
     context_text = _format_context(context)
     _log_context("answer", context_text)
@@ -301,7 +372,9 @@ async def answer_question(question: str, context: dict) -> tuple[str, list[str]]
         answer, follow_up = _parse_answer(response.content[0].text)
         still = find_rule_violations(answer, context, question)
         if still:
-            logger.warning("радник (answer): повторна відповідь теж порушила правила: %s", still)
+            logger.warning("радник (answer): повторна відповідь теж порушила правила, "
+                           "відповідь з речень контексту (%s): %s", question_category(question), still)
+            return fallback_answer(question, context), []
 
     _log_answer_issues("answer", answer, f"{context_text}\n{question}")
     return answer, follow_up

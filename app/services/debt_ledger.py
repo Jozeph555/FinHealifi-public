@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import today_override
 from app.models.debt import Debt
 from app.models.debt_plan import DebtBalanceCheck, DebtPayment, DebtPlanVersion
 
@@ -43,10 +44,12 @@ def today_kyiv(today: date | datetime | None = None) -> date:
 
     Args:
         today: Дата (повертається як є), aware-datetime (переводиться в
-            Europe/Kyiv) або None — поточний момент.
+            Europe/Kyiv) або None — дата з APP_TODAY_OVERRIDE, якщо її задано,
+            інакше поточний момент.
     """
     if today is None:
-        return datetime.now(KYIV_TZ).date()
+        override = today_override()
+        return override if override is not None else datetime.now(KYIV_TZ).date()
     if isinstance(today, datetime):
         if today.tzinfo is None:
             raise ValueError("datetime без часової зони")
@@ -85,6 +88,33 @@ def parse_month(value: str) -> date:
 def format_month(d: date) -> str:
     """Повертає місяць дати d у форматі YYYY-MM."""
     return d.strftime("%Y-%m")
+
+
+MONTHS_NOMINATIVE = (
+    "січень", "лютий", "березень", "квітень", "травень", "червень",
+    "липень", "серпень", "вересень", "жовтень", "листопад", "грудень",
+)
+
+
+def month_name(d: date) -> str:
+    """Місяць дати d у називному відмінку для текстів користувачу: «листопад 2026 р.»."""
+    return f"{MONTHS_NOMINATIVE[d.month - 1]} {d.year} р."
+
+
+MONTHS_GENITIVE = (
+    "січня", "лютого", "березня", "квітня", "травня", "червня",
+    "липня", "серпня", "вересня", "жовтня", "листопада", "грудня",
+)
+
+
+def date_text(d: date) -> str:
+    """Дата для текстів користувачу: «1 листопада 2026»."""
+    return f"{d.day} {MONTHS_GENITIVE[d.month - 1]} {d.year}"
+
+
+def month_closed(month: date, today: date) -> bool:
+    """Чи місяць закрито: він строго раніше за місяць дати today."""
+    return month_start(month) < month_start(today)
 
 
 # --- гроші --------------------------------------------------------------------------

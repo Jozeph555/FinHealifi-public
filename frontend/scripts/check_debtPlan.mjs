@@ -238,6 +238,32 @@ assert.equal(m.dashboardPlanView(withPreview, null).pendingText, m.pendingPlanTe
 assert.equal(m.acceptedPlanView(withPreview, "2026-11-20").messages.find((x) => x.key === "pending").text,
   m.pendingPlanText(pendingWithPreview));
 
+// --- стан «не погашається»: одне формулювання, без горизонту — горизонт за замовчуванням ---
+assert.equal(m.DEFAULT_PLAN_HORIZON_MONTHS, 36);
+assert.equal(m.notPaidOffLabel(24), "не погашається за 24 міс.");
+assert.equal(m.notPaidOffLabel(null), "не погашається за 36 міс.");
+assert.equal(m.notPaidOffLabel(undefined), "не погашається за 36 міс.");
+assert.equal(plain(m.pendingPlanText({ ...pendingWithPreview,
+  preview: { months_to_payoff: null, total_interest: 90000, horizon_months: null, based_on: "balances_at_build" } })),
+  "Новий план (додатковий платіж 1 500 грн) почне діяти з 1 грудня 2026: " +
+  "за розрахунком не погашається за 36 міс. (за залишками на момент побудови)");
+
+// --- серверна дата (GET /debt/today) замість дати браузера ---
+const browserNow = new Date("2026-11-05T10:00:00Z");
+assert.equal(m.resolveToday({ today: "2026-12-02", demo: true }, browserNow), "2026-12-02");
+assert.equal(m.resolveToday(null, browserNow), "2026-11-05", "без відповіді — дата браузера за Києвом");
+assert.equal(m.resolveToday({ today: "грудень" }, browserNow), "2026-11-05");
+assert.equal(m.demoDateText({ today: "2026-12-02", demo: true }), "Демонстраційна дата: 2026-12-02");
+assert.equal(m.demoDateText({ today: "2026-11-05", demo: false }), null);
+assert.equal(m.demoDateText(null), null);
+// Умова автоматичної фіксації і межі місяців — за серверною датою, а не за датою браузера.
+assert.equal(m.materializeAction(v2, m.resolveToday({ today: "2026-12-02", demo: true }, browserNow)), "too_early");
+assert.equal(m.materializeAction(v2, m.resolveToday({ today: "2026-12-08", demo: true }, browserNow)), "auto");
+assert.equal(pf.defaultMonth([{ month: "2026-11" }, { month: "2026-12" }],
+  m.resolveToday({ today: "2026-12-02", demo: true }, browserNow)), "2026-12");
+assert.equal(pf.defaultCheckDate("2026-12", m.resolveToday({ today: "2026-12-02", demo: true }, browserNow)),
+  "2026-12-02");
+
 // --- підпис блоку з числами чернетки на «Боргах» ---
 assert.equal(m.draftDetailsCaption(null, null), null);
 assert.equal(m.draftDetailsCaption({ plan_id: "p11" }, null), "Чернетка");
@@ -295,6 +321,12 @@ assert.deepEqual(pf.parseMoneyInput("0", { allowZero: true }), { value: 0, error
 assert.equal(pf.parseMoneyInput("-5").error, "Сума не може бути від'ємною.");
 assert.ok(pf.parseMoneyInput("1e5").error);
 assert.ok(pf.parseMoneyInput("").error);
+
+// --- наслідок (GET /debt/plan-fact/outcome) ---
+assert.equal(pf.outcomeText(null), null);
+assert.equal(pf.outcomeText({ status: "ok", sentence: "" }), null);
+assert.equal(pf.outcomeText({ status: "unresolved_months", sentence: "Щоб порахувати наслідок, внеси платежі." }),
+  "Щоб порахувати наслідок, внеси платежі.");
 
 // --- місяці: межа за Києвом ---
 const kyivMonth = (iso, months) => pf.defaultMonth(months, m.todayKyiv(new Date(iso)));
@@ -402,6 +434,39 @@ assert.equal(pf.noPaymentsAction({ ...closedMonth, entry_state: "no_payments_con
 assert.equal(pf.noPaymentsAction({ ...closedMonth, entry_state: "entered", editable: true }), null);
 assert.equal(pf.noPaymentsAction({ ...closedMonth, entry_state: "not_entered", editable: false }), null,
   "заблокований місяць — без дій");
+const markMonth = { ...closedMonth, closed: false, editable: true, no_payments_mark: false };
+assert.equal(pf.noPaymentsAction({ ...markMonth, entry_state: "not_entered" }), "ongoing",
+  "місяць, що триває, — без кнопки «Платежів не було»");
+assert.equal(pf.noPaymentsAction({ ...markMonth, entry_state: "entered" }), null);
+assert.equal(pf.noPaymentsAction({ ...markMonth, entry_state: "not_entered", no_payments_mark: true }), "unmark",
+  "наявну позначку на незакритому місяці можна скасувати");
+assert.equal(pf.noPaymentsAction({ ...closedMonth, entry_state: "not_entered", editable: true,
+  no_payments_mark: false }), "mark");
+assert.equal(pf.noPaymentsAction({ ...closedMonth, entry_state: "no_payments_confirmed", editable: true,
+  no_payments_mark: true }), "unmark");
+assert.equal(pf.noPaymentsAction({ ...markMonth, no_payments_mark: true, editable: false }), null);
+assert.equal(pf.MONTH_ONGOING_TEXT, "Місяць ще триває");
+
+// --- місяць дії з 409 фіксації ---
+assert.equal(pf.monthNameUk("2026-11"), "листопад 2026 р.");
+assert.equal(pf.monthNameUk("2027-01"), "січень 2027 р.");
+assert.equal(pf.monthNameUk("2026-13"), null);
+assert.equal(pf.monthNameUk(null), null);
+assert.equal(pf.materializeUnresolvedMonth(409, { detail: "…", unresolved_month: "2026-11" }), "2026-11");
+assert.equal(pf.materializeUnresolvedMonth(409, { detail: "рано" }), null);
+assert.equal(pf.materializeUnresolvedMonth(422, { unresolved_month: "2026-11" }), null);
+assert.equal(pf.materializeUnresolvedMonth(409, { unresolved_month: "листопад" }), null);
+assert.equal(pf.materializeUnresolvedMonth(undefined, undefined), null);
+assert.deepEqual(pf.unresolvedMonthLabels("2026-11"), {
+  mark: "Позначити, що платежів за листопад 2026 р. не було",
+  enter: "Внести платежі за листопад 2026 р.",
+});
+assert.equal(pf.unresolvedMonthLabels(null), null);
+// Вибір місяця в таблиці: запитаний місяць, якщо він є серед місяців, інакше поточний вибір.
+const focusMonths = [{ month: "2026-11" }, { month: "2026-12" }];
+assert.equal(pf.focusedMonth(focusMonths, "2026-11", "2026-12"), "2026-11");
+assert.equal(pf.focusedMonth(focusMonths, "2026-10", "2026-12"), "2026-12");
+assert.equal(pf.focusedMonth(focusMonths, null, "2026-12"), "2026-12");
 
 // --- звірка ---
 assert.equal(pf.defaultCheckDate("2026-12", "2026-12-07"), "2026-12-07");

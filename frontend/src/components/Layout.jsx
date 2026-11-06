@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import api from "../services/api";
+import { demoDateText } from "../utils/debtPlan";
 
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard" },
@@ -14,6 +17,15 @@ const NAV_ITEMS = [
 export default function Layout({ children }) {
   const { logout } = useAuth();
   const navigate = useNavigate();
+  // Помітка, якщо сервер працює з демонстраційною датою (APP_TODAY_OVERRIDE).
+  const [demoText, setDemoText] = useState(null);
+
+  useEffect(() => {
+    api
+      .get("/debt/today")
+      .then((res) => setDemoText(demoDateText(res.data)))
+      .catch(() => setDemoText(null));
+  }, []);
 
   function handleLogout() {
     logout();
@@ -25,9 +37,16 @@ export default function Layout({ children }) {
       <header className="border-b border-ink/10 bg-white">
         {/* На вузькому екрані навігація — окремим рядком під назвою, з власною прокруткою. */}
         <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3">
-          <span className="font-display text-lg font-semibold text-forest">
-            FinHealifi
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-display text-lg font-semibold text-forest">
+              FinHealifi
+            </span>
+            {demoText && (
+              <span className="rounded-full bg-gold/20 px-2.5 py-0.5 text-xs font-medium text-ink/80">
+                {demoText}
+              </span>
+            )}
+          </div>
 
           <nav className="-mx-1 flex w-full items-center gap-1 overflow-x-auto px-1 sm:mx-0 sm:w-auto sm:px-0">
             {NAV_ITEMS.map((item) => (

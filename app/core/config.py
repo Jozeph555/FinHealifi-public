@@ -2,9 +2,12 @@
 Налаштування застосунку зі змінних середовища (.env).
 
 JWT_SECRET_KEY, FERNET_KEY і ANTHROPIC_API_KEY обов'язкові: без них імпорт
-модуля завершується RuntimeError.
+модуля завершується RuntimeError. APP_TODAY_OVERRIDE (YYYY-MM-DD, необов'язкова)
+підміняє «сьогодні» для плану й план-факту; неправильний формат — RuntimeError.
 """
 import os
+from datetime import date, datetime
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,3 +44,28 @@ CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
 # Ліміт часу MILP-розв'язувача CBC, секунди.
 MILP_TIME_LIMIT_SEC = float(os.getenv("MILP_TIME_LIMIT_SEC", "10"))
+
+# Змінна середовища з демонстраційною датою «сьогодні» (YYYY-MM-DD); через API не змінюється.
+APP_TODAY_OVERRIDE_ENV = "APP_TODAY_OVERRIDE"
+
+
+def today_override() -> date | None:
+    """Повертає дату з APP_TODAY_OVERRIDE або None, якщо змінну не задано чи вона порожня.
+
+    Змінна читається з оточення під час кожного виклику.
+
+    Raises:
+        RuntimeError: значення не у форматі YYYY-MM-DD.
+    """
+    raw = (os.getenv(APP_TODAY_OVERRIDE_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        if len(raw) != 10:
+            raise ValueError(raw)
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise RuntimeError(f"{APP_TODAY_OVERRIDE_ENV}={raw!r}: очікується дата у форматі YYYY-MM-DD") from exc
+
+
+today_override()

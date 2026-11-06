@@ -10,14 +10,17 @@ import {
   NO_DATA_TEXT,
   NO_PAYMENTS_BUTTON_LABEL,
   NO_PAYMENTS_UNDO_LABEL,
+  MONTH_ONGOING_TEXT,
   checkCaption,
   countedFromText,
   cumulativeView,
   defaultCheckDate,
   defaultMonth,
+  focusedMonth,
   formatMonthUk,
   monthStateLabels,
   noPaymentsAction,
+  outcomeText,
   parseMoneyInput,
   paymentErrorText,
   planFactRowView,
@@ -30,15 +33,28 @@ const INPUT_CLASS =
 // Блок «План і факт» під карткою плану: платежі за боргами, порівняння з планом по місяцях.
 // debts — активні борги (GET /debt); today — сьогодні за Києвом, "YYYY-MM-DD";
 // onLedgerChange — викликається після кожного запису (платіж, звірка, позначка місяця),
-// щоб сторінка перечитала залишки боргів.
-export default function PlanFact({ debts, today, onLedgerChange }) {
+// щоб сторінка перечитала залишки боргів. focusRequest — { month: "YYYY-MM", nonce }: перемкнути
+// селектор на цей місяць і прокрутити до блоку; reloadToken — зміна значення перечитує план-факт.
+export default function PlanFact({ debts, today, onLedgerChange, focusRequest, reloadToken }) {
   const [planFact, setPlanFact] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [month, setMonth] = useState(null);
   const [payments, setPayments] = useState([]);
   const [paymentsError, setPaymentsError] = useState(null);
+  // Наслідок внесених платежів (GET /debt/plan-fact/outcome); null — немає або не завантажено.
+  const [outcome, setOutcome] = useState(null);
+
+  async function loadOutcome() {
+    try {
+      const res = await api.get("/debt/plan-fact/outcome");
+      setOutcome(res.data);
+    } catch {
+      setOutcome(null);
+    }
+  }
 
   async function loadPlanFact() {
+    loadOutcome();
     try {
       const res = await api.get("/debt/plan-fact");
       setPlanFact(res.data);
@@ -70,7 +86,17 @@ export default function PlanFact({ debts, today, onLedgerChange }) {
 
   useEffect(() => {
     loadPlanFact();
-  }, []);
+  }, [reloadToken]);
+
+  // Запит перейти до місяця виконується один раз, коли місяці вже завантажено.
+  const sectionRef = useRef(null);
+  const handledFocus = useRef(null);
+  useEffect(() => {
+    if (!focusRequest || !planFact || handledFocus.current === focusRequest.nonce) return;
+    handledFocus.current = focusRequest.nonce;
+    setMonth((current) => focusedMonth(planFact.months, focusRequest.month, current));
+    sectionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [focusRequest, planFact]);
 
   useEffect(() => {
     loadPayments(month);
@@ -90,7 +116,7 @@ export default function PlanFact({ debts, today, onLedgerChange }) {
   ]);
 
   return (
-    <section className="rounded-xl border border-ink/10 bg-white p-5">
+    <section ref={sectionRef} className="rounded-xl border border-ink/10 bg-white p-5">
       <h2 className="mb-4 text-sm font-medium uppercase tracking-wide text-ink/50">План і факт</h2>
 
       <div className="space-y-5">
@@ -119,6 +145,10 @@ export default function PlanFact({ debts, today, onLedgerChange }) {
             </div>
 
             <MonthComparison month={selected} today={today} onChanged={refresh} />
+
+            {outcomeText(outcome) && (
+              <p className="rounded-lg bg-ink/5 px-3 py-2 text-sm text-ink/80">{outcomeText(outcome)}</p>
+            )}
 
             <NoPaymentsMark month={selected} onChanged={refresh} />
 
@@ -161,6 +191,7 @@ function NoPaymentsMark({ month, onChanged }) {
   }
 
   if (!action && !error) return null;
+  if (action === "ongoing") return <p className="text-xs text-ink/50">{MONTH_ONGOING_TEXT}</p>;
   return (
     <div className="space-y-2">
       {action && (

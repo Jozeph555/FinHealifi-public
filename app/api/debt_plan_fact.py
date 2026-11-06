@@ -2,9 +2,11 @@
 План-факт для боргів: прийняття плану, знімок версії, платежі, звірки й порівняння.
 
 - POST /debt/plans/{plan_id}/accept — прийняти чернетку плану.
+- GET /debt/today — серверна дата «сьогодні» для інтерфейсу.
 - GET /debt/plan/active — прийнята версія і її розклад.
 - POST /debt/plan/materialize — зафіксувати розклад версії, що набрала чинності.
 - GET /debt/plan-fact — план і факт по місяцях і боргах.
+- GET /debt/plan-fact/outcome — прогноз закриття боргів від фактичних залишків.
 - POST/GET /debt/payments, PATCH/DELETE /debt/payments/{id} — платежі за боргами.
 - POST /debt/{debt_id}/balance-checks — звірка залишку за випискою.
 - PUT /debt/plan-fact/months/{month}/no-payments — позначка «платежів не було».
@@ -16,21 +18,23 @@ from datetime import date, datetime, timezone
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, BeforeValidator, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.debt import DEBT_BALANCE_MAX_UAH, _reject_non_finite
 from app.api.deps import get_current_user, get_db, get_today
+from app.core.config import today_override
 from app.models.debt import Debt
 from app.models.debt_plan import DebtPayment, DebtPlanMonth, DebtPlanSchedule
 from app.models.milp_plan import MilpPlan
 from app.models.user import User
 from app.services import debt_ledger as ledger
+from app.services import debt_outcome
 from app.services import debt_plan_versions as versions_service
 from app.services.debt_fingerprint import debts_structure_fingerprint
 from app.services.debt_plan_versions import PlanFactError
-from app.services.debt_rules import debt_min_payment
 
 router = APIRouter(prefix="/debt", tags=["debt-plan-fact"])
 
@@ -45,6 +49,11 @@ CheckBalance = Annotated[
 def _raise(exc: PlanFactError) -> None:
     """Перетворює PlanFactError на HTTPException."""
     raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+def _error_response(exc: PlanFactError) -> JSONResponse:
+    """Відповідь на PlanFactError: detail і додаткові машинозчитні поля помилки."""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, **exc.extra})
 
 
 def _to_api(value):
@@ -176,14 +185,7 @@ async def _version_body(db: AsyncSession, user_id: str, version, today: date) ->
             structure_changed = debts_structure_fingerprint(states) != source.debts_structure_fingerprint
 
     # Бюджет знімка: обов'язкові платежі від стартових залишків першого місяця + додатковий.
-    min_total = None
-    if rows:
-        first_month = rows[0].month
-        min_total = round(sum(
-            debt_min_payment(debts[r.debt_id].debt_type, ledger.kop_to_uah(r.opening_kop),
-                             debts[r.debt_id].monthly_rate, debts[r.debt_id].min_payment)
-            for r in rows if r.month == first_month
-        ), 2)
+    min_total = versions_service.schedule_min_payments_total(rows, debts)
     extra = ledger.kop_to_uah(version.extra_monthly_kop)
     added_debts, removed_debts = await _debt_set_changes(db, version, rows, names)
     preview = _draft_preview(source) if version.materialized_at is None else None
@@ -221,6 +223,19 @@ async def _version_body(db: AsyncSession, user_id: str, version, today: date) ->
         "in_force_version_id": in_force.id if in_force else None,
         "schedule": list(schedule.values()),
     })
+
+
+@router.get("/today")
+async def server_today(
+    current_user: User = Depends(get_current_user),
+    today: date = Depends(get_today),
+):
+    """Повертає дату «сьогодні», за якою сервер рахує план і план-факт.
+
+    today — YYYY-MM-DD (Europe/Kyiv або APP_TODAY_OVERRIDE); demo — true, якщо
+    задано APP_TODAY_OVERRIDE. Дату задає лише змінна середовища сервера.
+    """
+    return {"today": today.isoformat(), "demo": today_override() is not None}
 
 
 @router.post("/plans/{plan_id}/accept", status_code=201)
@@ -309,13 +324,14 @@ async def materialize_plan(
     (200); новий розклад — 201.
 
     Повертає 404 — немає прийнятого плану; 409 — версія ще не діє, рано без
-    force або за попередній місяць не внесено платежів; 422 — план неможливий;
+    force або за попередній місяць не внесено платежів (тоді в тілі є
+    unresolved_month — цей місяць у форматі YYYY-MM); 422 — план неможливий;
     503 — розв'язувач не встиг.
     """
     try:
         version, created = await versions_service.materialize(db, current_user.id, force=force, today=today)
     except PlanFactError as exc:
-        _raise(exc)
+        return _error_response(exc)
     response.status_code = 201 if created else 200
     return await _version_body(db, current_user.id, version, today)
 
@@ -331,8 +347,10 @@ async def plan_fact(
     """Порівнює план і факт по місяцях і боргах; лише читає дані.
 
     Для кожного місяця: чинна версія, closed, editable, entry_state
-    (entered / not_entered / no_payments_confirmed), counted_from (дата прийняття
-    для першого місяця першого плану) і рядки боргів: плановий і фактичний
+    (entered / not_entered / no_payments_confirmed; позначка «платежів не було»
+    дає no_payments_confirmed лише закритому місяцю), no_payments_mark (чи
+    позначку поставлено, зокрема на незакритому місяці), counted_from (дата
+    прийняття для першого місяця першого плану) і рядки боргів: плановий і фактичний
     платіж, плановий і фактичний залишок на кінець місяця, розбіжності (факт
     мінус план), переплата понад борг, звірка місяця. У рядку зі звіркою
     (check) balance_diff — null: після звірки відсотки решти місяця не
@@ -357,6 +375,36 @@ async def plan_fact(
     return _to_api(result)
 
 
+@router.get("/plan-fact/outcome")
+async def plan_fact_outcome(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    today: date = Depends(get_today),
+):
+    """Прогнозує закриття боргів від фактичних залишків на початок поточного місяця; лише читає дані.
+
+    Бюджет — як у чинній версії (обов'язкові платежі від стартових залишків її
+    розкладу + додатковий платіж), розподіл — спочатку борг з найвищою ставкою.
+    status: "ok"; "unresolved_months" — у закритих місяцях (unresolved_months,
+    YYYY-MM) немає внесених платежів і позначки «платежів не було», тоді
+    числа — null; "paid_off" — усі борги вже закрито. payoff_month і
+    version_payoff_month — місяць закриття за прогнозом і за чинною версією
+    (YYYY-MM або null: не за горизонт або версію ще не зафіксовано);
+    payoff_shift_months — прогноз мінус версія; projected_total_interest —
+    відсотки минулих місяців версії й прогнозу; interest_diff — прогноз мінус
+    version_total_interest. sentence — готове речення українською, суми в
+    цілих гривнях. Повертає 404 без прийнятого плану.
+    """
+    try:
+        result = await debt_outcome.plan_outcome(db, current_user.id, today)
+    except PlanFactError as exc:
+        _raise(exc)
+    for key in ("payoff_month", "version_payoff_month"):
+        result[key] = ledger.format_month(result[key]) if result[key] else None
+    result["unresolved_months"] = [ledger.format_month(m) for m in result["unresolved_months"]]
+    return _to_api(result)
+
+
 # --- позначка «платежів не було» --------------------------------------------------------------
 
 class NoPaymentsRequest(BaseModel):
@@ -374,9 +422,12 @@ async def set_no_payments(
 ):
     """Ставить або знімає позначку «платежів не було» для місяця YYYY-MM.
 
-    Повертає 422 — неправильний формат або майбутній місяць; 409 — плану ще
-    немає, місяць до початку першого плану чи заблоковано, або в місяці вже є
-    платежі (для confirmed=true).
+    Позначку можна поставити лише на закритий місяць (строго раніше за
+    поточний); зняти — і на незакритому.
+
+    Повертає 422 — неправильний формат, майбутній місяць або позначка на
+    місяці, що ще триває; 409 — плану ще немає, місяць до початку першого плану
+    чи заблоковано, або в місяці вже є платежі (для confirmed=true).
     """
     month_date = _month_param(month, "month")
     if month_date > ledger.month_start(today):
@@ -389,8 +440,15 @@ async def set_no_payments(
         await versions_service.ensure_month_editable(db, current_user.id, month_date, today)
     except PlanFactError as exc:
         _raise(exc)
-    if request.confirmed and await versions_service.month_entry_state(db, current_user.id, month_date) == "entered":
+    if request.confirmed and await versions_service.month_entry_state(
+            db, current_user.id, month_date, today) == "entered":
         raise HTTPException(status_code=409, detail="У цьому місяці вже є платежі.")
+    if request.confirmed and not ledger.month_closed(month_date, today):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Місяць {ledger.month_name(month_date)} ще триває: позначити, що платежів не було, "
+                   "можна після його завершення.",
+        )
 
     mark = await db.get(DebtPlanMonth, (current_user.id, month_date))
     if mark is None:
@@ -400,7 +458,7 @@ async def set_no_payments(
     mark.confirmed_at = datetime.now(timezone.utc) if request.confirmed else None
     await db.commit()
     return {"month": ledger.format_month(month_date),
-            "entry_state": await versions_service.month_entry_state(db, current_user.id, month_date)}
+            "entry_state": await versions_service.month_entry_state(db, current_user.id, month_date, today)}
 
 
 # --- платежі ----------------------------------------------------------------------------------
